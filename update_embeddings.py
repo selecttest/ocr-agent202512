@@ -10,21 +10,29 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DB_CONFIG = {
-    "host": os.environ.get("DB_HOST", os.environ.get("DB_HOST", "localhost")),  # 請替換
-    "port": "5432",
-    "database": "ocr_rag",
-    "user": "postgres",
-    "password": os.environ.get("DB_PASSWORD", os.environ.get("DB_PASSWORD", ""))  # 請替換
-}
+
+def get_db_connection():
+    """取得資料庫連線"""
+    DB_HOST = os.environ.get("DB_HOST")
+    DB_PASSWORD = os.environ.get("DB_PASSWORD")
+    
+    if not DB_HOST or not DB_PASSWORD:
+        raise ValueError("請設定 DB_HOST 和 DB_PASSWORD 環境變數")
+    
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=os.environ.get("DB_PORT", "5432"),
+        database=os.environ.get("DB_NAME", "ocr_rag"),
+        user=os.environ.get("DB_USER", "postgres"),
+        password=DB_PASSWORD
+    )
 
 
 def update_block_embeddings():
     """為所有沒有 embedding 的 blocks 生成 embedding"""
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = get_db_connection()
     cur = conn.cursor()
     
-    # 取得沒有 embedding 的 blocks
     cur.execute("""
         SELECT id, content FROM blocks 
         WHERE embedding IS NULL AND content IS NOT NULL AND content != ''
@@ -56,7 +64,7 @@ def update_block_embeddings():
 
 def update_image_embeddings():
     """為所有沒有 embedding 的 images 生成 embedding"""
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute("""

@@ -11,13 +11,13 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 資料庫連線設定
+# 資料庫連線設定（全部從環境變數讀取）
 DB_CONFIG = {
-    "host": os.environ.get("DB_HOST", "10.36.64.3"),  
+    "host": os.environ.get("DB_HOST"),
     "port": os.environ.get("DB_PORT", "5432"),
     "database": os.environ.get("DB_NAME", "ocr_rag"),
     "user": os.environ.get("DB_USER", "postgres"),
-    "password": os.environ.get("DB_PASSWORD", "ocr_DB251223")  # 請替換
+    "password": os.environ.get("DB_PASSWORD")
 }
 
 
@@ -27,6 +27,10 @@ class Database:
     
     def connect(self):
         """建立資料庫連線"""
+        if not DB_CONFIG["host"] or not DB_CONFIG["password"]:
+            logger.error("請設定 DB_HOST 和 DB_PASSWORD 環境變數")
+            return False
+        
         try:
             self.conn = psycopg2.connect(**DB_CONFIG)
             logger.info("資料庫連線成功")
@@ -59,7 +63,7 @@ class Database:
                 ocr_result.get("detected_type", ""),
                 ocr_result.get("language", ""),
                 ocr_result.get("total_pages", 0),
-                ocr_result.get("processing_time", {}).get("total_seconds"),
+                ocr_result.get("processing_time", {}).get("total_seconds") if ocr_result.get("processing_time") else None,
                 ocr_result.get("full_text", ""),
                 Json(ocr_result.get("processing_time"))
             ))
@@ -138,22 +142,18 @@ class Database:
         try:
             cur = self.conn.cursor(cursor_factory=RealDictCursor)
             
-            # 取得文件
             cur.execute("SELECT * FROM documents WHERE id = %s", (doc_id,))
             doc = cur.fetchone()
             
             if not doc:
                 return None
             
-            # 取得 blocks
             cur.execute("SELECT * FROM blocks WHERE document_id = %s ORDER BY page, block_id", (doc_id,))
             blocks = cur.fetchall()
             
-            # 取得 key_values
             cur.execute("SELECT * FROM key_values WHERE document_id = %s", (doc_id,))
             key_values = cur.fetchall()
             
-            # 取得 images
             cur.execute("SELECT * FROM images WHERE document_id = %s", (doc_id,))
             images = cur.fetchall()
             
@@ -194,7 +194,6 @@ class Database:
         try:
             cur = self.conn.cursor(cursor_factory=RealDictCursor)
             
-            # 使用 cosine 相似度搜尋
             cur.execute("""
                 SELECT 
                     b.id,

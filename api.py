@@ -128,8 +128,7 @@ async def ocr_upload(file: UploadFile = File(...), save_to_db: bool = True):
                 document_id = db.save_document(result_dict, file.filename)
                 logger.info(f"文件已儲存到資料庫，ID: {document_id}")
                 
-                # 非同步生成 embedding（簡化版：直接在這裡處理）
-                # 正式環境應該用 background task
+                # 生成 embedding
                 update_embeddings_for_document(document_id)
                 
             except Exception as e:
@@ -243,8 +242,12 @@ def update_embeddings_for_document(doc_id: str):
     """為特定文件的 blocks 生成 embedding"""
     import psycopg2
     
-    DB_HOST = os.environ.get("DB_HOST", os.environ.get("DB_HOST", "localhost"))
-    DB_PASSWORD = os.environ.get("DB_PASSWORD", os.environ.get("DB_PASSWORD", ""))
+    DB_HOST = os.environ.get("DB_HOST")
+    DB_PASSWORD = os.environ.get("DB_PASSWORD")
+    
+    if not DB_HOST or not DB_PASSWORD:
+        logger.error("缺少 DB_HOST 或 DB_PASSWORD 環境變數")
+        return
     
     conn = psycopg2.connect(
         host=DB_HOST,
