@@ -186,37 +186,123 @@ class Database:
             logger.error(f"列出文件失敗: {e}")
             return []
     
-    def search_blocks(self, query_embedding: List[float], limit: int = 10) -> List[Dict]:
-        """向量搜尋相關區塊"""
+    def search_blocks(self, query_embedding: List[float], limit: int = 10, document_ids: List[str] = None) -> List[Dict]:
+        """向量搜尋相關區塊
+        
+        Args:
+            query_embedding: 查詢向量
+            limit: 回傳數量上限
+            document_ids: 可選，限定搜尋的文件 ID 列表
+        """
         if not self.conn:
             self.connect()
         
         try:
             cur = self.conn.cursor(cursor_factory=RealDictCursor)
             
-            cur.execute("""
-                SELECT 
-                    b.id,
-                    b.document_id,
-                    b.block_type,
-                    b.page,
-                    b.region,
-                    b.content,
-                    d.filename,
-                    d.detected_type,
-                    1 - (b.embedding <=> %s::vector) as similarity
-                FROM blocks b
-                JOIN documents d ON b.document_id = d.id
-                WHERE b.embedding IS NOT NULL
-                ORDER BY b.embedding <=> %s::vector
-                LIMIT %s
-            """, (query_embedding, query_embedding, limit))
+            if document_ids and len(document_ids) > 0:
+                # 有指定文件 ID，只搜尋這些文件
+                cur.execute("""
+                    SELECT 
+                        b.id,
+                        b.document_id,
+                        b.block_type,
+                        b.page,
+                        b.region,
+                        b.content,
+                        d.filename,
+                        d.detected_type,
+                        1 - (b.embedding <=> %s::vector) as similarity
+                    FROM blocks b
+                    JOIN documents d ON b.document_id = d.id
+                    WHERE b.embedding IS NOT NULL
+                      AND b.document_id = ANY(%s::uuid[])
+                    ORDER BY b.embedding <=> %s::vector
+                    LIMIT %s
+                """, (query_embedding, document_ids, query_embedding, limit))
+            else:
+                # 沒有指定文件 ID，搜尋所有文件
+                cur.execute("""
+                    SELECT 
+                        b.id,
+                        b.document_id,
+                        b.block_type,
+                        b.page,
+                        b.region,
+                        b.content,
+                        d.filename,
+                        d.detected_type,
+                        1 - (b.embedding <=> %s::vector) as similarity
+                    FROM blocks b
+                    JOIN documents d ON b.document_id = d.id
+                    WHERE b.embedding IS NOT NULL
+                    ORDER BY b.embedding <=> %s::vector
+                    LIMIT %s
+                """, (query_embedding, query_embedding, limit))
             
             return [dict(row) for row in cur.fetchall()]
             
         except Exception as e:
             logger.error(f"向量搜尋失敗: {e}")
             return []
+    
+    def delete_document(self, doc_id: str) -> bool:
+        """刪除文件及其所有相關資料
+        
+        由於資料表有設定 ON DELETE CASCADE，
+        刪除 documents 表的記錄會自動刪除 blocks、key_values、images 的相關記錄
+        """
+        if not self.conn:
+            self.connect()
+        
+        try:
+            cur = self.conn.cursor()
+            
+            # 先檢查文件是否存在
+            cur.execute("SELECT id, filename FROM documents WHERE id = %s", (doc_id,))
+            doc = cur.fetchone()
+            
+            if not doc:
+                logger.warning(f"文件不存在: {doc_id}")
+                return False
+            
+            filename = doc[1]
+            
+            # 刪除文件（CASCADE 會自動刪除關聯資料）
+            cur.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
+            
+            self.conn.commit()
+            logger.info(f"已刪除文件: {filename} (ID: {doc_id})")
+            return True
+            
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"刪除文件失敗: {e}")
+            return False
+    
+    def delete_documents(self, doc_ids: List[str]) -> Dict:
+        """批次刪除多個文件
+        
+        Returns:
+            Dict: {"deleted": 成功數量, "failed": 失敗數量, "deleted_ids": 成功刪除的ID列表}
+        """
+        if not self.conn:
+            self.connect()
+        
+        deleted_ids = []
+        failed_count = 0
+        
+        for doc_id in doc_ids:
+            if self.delete_document(doc_id):
+                deleted_ids.append(doc_id)
+            else:
+                failed_count += 1
+        
+        return {
+            "deleted": len(deleted_ids),
+            "failed": failed_count,
+            "deleted_ids": deleted_ids
+        }
 
 
 # 全域資料庫實例

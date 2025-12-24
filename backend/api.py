@@ -74,11 +74,27 @@ class DocumentListResponse(BaseModel):
 class QuestionRequest(BaseModel):
     question: str
     top_k: int = 5
+    document_ids: Optional[List[str]] = None  # 可選：指定要查詢的文件 ID 列表
 
 
 class AnswerResponse(BaseModel):
     answer: str
     sources: List[Dict]
+
+
+class DeleteResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class BatchDeleteRequest(BaseModel):
+    document_ids: List[str]
+
+
+class BatchDeleteResponse(BaseModel):
+    deleted: int
+    failed: int
+    deleted_ids: List[str]
 
 
 # ==================== API 端點 ====================
@@ -170,15 +186,49 @@ async def get_document(doc_id: str):
     return result
 
 
+@app.delete("/documents/{doc_id}", response_model=DeleteResponse)
+async def delete_document(doc_id: str):
+    """刪除特定文件及其所有相關資料"""
+    logger.info(f"收到刪除文件請求: {doc_id}")
+    
+    success = db.delete_document(doc_id)
+    
+    if success:
+        return DeleteResponse(
+            success=True,
+            message=f"文件 {doc_id} 已成功刪除"
+        )
+    else:
+        raise HTTPException(status_code=404, detail="文件不存在或刪除失敗")
+
+
+@app.post("/documents/batch-delete", response_model=BatchDeleteResponse)
+async def batch_delete_documents(request: BatchDeleteRequest):
+    """批次刪除多個文件"""
+    logger.info(f"收到批次刪除請求: {len(request.document_ids)} 個文件")
+    
+    result = db.delete_documents(request.document_ids)
+    
+    return BatchDeleteResponse(
+        deleted=result["deleted"],
+        failed=result["failed"],
+        deleted_ids=result["deleted_ids"]
+    )
+
+
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
     """
     RAG 問答：根據已上傳的文件回答問題
+    - document_ids: 可選，指定要查詢的文件 ID 列表（為空時搜尋所有文件）
     """
     question = request.question
     top_k = request.top_k
+    document_ids = request.document_ids
     
     logger.info(f"收到問題: {question}")
+    if document_ids:
+        logger.info(f"限定查詢文件: {document_ids}")
     
     try:
         # 1. 將問題轉成 embedding
@@ -187,14 +237,21 @@ async def ask_question(request: QuestionRequest):
         if not question_embedding:
             raise HTTPException(status_code=500, detail="無法生成問題的 embedding")
         
-        # 2. 向量搜尋相關內容
-        relevant_blocks = db.search_blocks(question_embedding, limit=top_k)
+        # 2. 向量搜尋相關內容（支援文件篩選）
+        relevant_blocks = db.search_blocks(
+            question_embedding, 
+            limit=top_k,
+            document_ids=document_ids
+        )
         
         if not relevant_blocks:
-            return AnswerResponse(
-                answer="抱歉，我在已上傳的文件中找不到相關資訊。請先上傳相關的 PDF 文件。",
-                sources=[]
-            )
+            msg = "抱歉，在"
+            if document_ids:
+                msg += f"選擇的 {len(document_ids)} 份文件中"
+            else:
+                msg += "已上傳的文件中"
+            msg += "找不到相關資訊。"
+            return AnswerResponse(answer=msg, sources=[])
         
         # 3. 組合 context
         context_parts = []

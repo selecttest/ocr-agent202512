@@ -62,6 +62,13 @@ export interface DocumentDetail {
   images: Array<{ id: string; image_type: string; page: number; region: string; description: string }>
 }
 
+/** RAG 問答請求 */
+export interface AskRequest {
+  question: string
+  top_k?: number
+  document_ids?: string[]
+}
+
 /** RAG 問答回應 */
 export interface AskResponse {
   answer: string
@@ -79,6 +86,19 @@ export interface HealthResponse {
   project_id: string
   location: string
   version: string
+}
+
+/** 刪除回應 */
+export interface DeleteResponse {
+  success: boolean
+  message: string
+}
+
+/** 批次刪除回應 */
+export interface BatchDeleteResponse {
+  deleted: number
+  failed: number
+  deleted_ids: string[]
 }
 
 // ==================== API Composable ====================
@@ -213,6 +233,100 @@ export const useApi = () => {
     }
   }
 
+  /**
+   * RAG 問答（指定文件）
+   */
+  const askQuestionWithDocs = async (
+    question: string,
+    documentIds: string[],
+    topK = 5
+  ): Promise<AskResponse | null> => {
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/ask`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          question,
+          top_k: topK,
+          document_ids: documentIds
+        })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || '問答失敗')
+      }
+
+      return await response.json()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '問答失敗'
+      return null
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /**
+   * 刪除單一文件
+   */
+  const deleteDocument = async (docId: string): Promise<DeleteResponse | null> => {
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/documents/${docId}`, {
+        method: 'DELETE'
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || '刪除失敗')
+      }
+
+      return await response.json()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '刪除失敗'
+      return null
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /**
+   * 批次刪除多個文件
+   */
+  const deleteDocuments = async (docIds: string[]): Promise<BatchDeleteResponse | null> => {
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/documents/batch-delete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ document_ids: docIds })
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || '批次刪除失敗')
+      }
+
+      return await response.json()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '批次刪除失敗'
+      return null
+    } finally {
+      loading.value = false
+    }
+  }
+
   return {
     // 狀態
     loading: readonly(loading),
@@ -222,7 +336,10 @@ export const useApi = () => {
     uploadPDF,
     getDocuments,
     getDocument,
-    askQuestion
+    deleteDocument,
+    deleteDocuments,
+    askQuestion,
+    askQuestionWithDocs
   }
 }
 
