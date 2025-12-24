@@ -1,0 +1,16 @@
+# 虛擬環境
+venv/
+__pycache__/
+*.pyc
+
+# 環境變數和機密資訊
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# 暫存檔
+*.tmp
+*.swp
