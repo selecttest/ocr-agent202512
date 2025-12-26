@@ -37,18 +37,24 @@ class UniversalOCRAgent:
     
     SYSTEM_PROMPT = """你是專業的文件分析系統。請完整提取文件中的所有重要資訊，包括表格每一列數據、圖片中的所有文字標註。輸出必須是有效的 JSON。"""
 
-    EXTRACTION_PROMPT = """仔細分析 PDF 第 {start_page}-{end_page} 頁的所有內容，完整提取所有文字資訊，輸出 JSON。
+    EXTRACTION_PROMPT = """仔細分析這份 PDF 文件的所有內容，完整提取所有文字資訊，輸出 JSON。
+
+【頁碼規則 - 非常重要】：
+- 這份 PDF 共有 {total_batch_pages} 頁
+- 請使用 PDF 的【物理頁序】作為頁碼，從 {start_page} 開始到 {end_page}
+- 第一頁就是 {start_page}，第二頁是 {second_page}，依此類推
+- 不要使用 PDF 內部顯示的頁碼（如頁腳標記），只使用物理順序
 
 格式：
 {{
   "detected_type": "文件類型",
   "language": "zh-TW",
   "blocks": [
-    {{"id": "b1", "type": "類型", "page": 1, "region": "位置", "content": "完整內容文字"}}
+    {{"id": "b1", "type": "類型", "page": {start_page}, "region": "位置", "content": "完整內容文字"}}
   ],
-  "key_value_pairs": [{{"key": "欄位名稱", "value": "欄位值", "page": 1}}],
-  "tables": [{{"id": "t1", "page": 1, "summary": "表格標題", "data": "完整表格內容"}}],
-  "images": [{{"id": "i1", "type": "類型", "page": 1, "description": "圖片完整描述"}}],
+  "key_value_pairs": [{{"key": "欄位名稱", "value": "欄位值", "page": {start_page}}}],
+  "tables": [{{"id": "t1", "page": {start_page}, "summary": "表格標題", "data": "完整表格內容"}}],
+  "images": [{{"id": "i1", "type": "類型", "page": {start_page}, "description": "圖片完整描述"}}],
   "summary": "文件完整摘要"
 }}
 
@@ -57,26 +63,24 @@ class UniversalOCRAgent:
 
 【重要規則 - 務必遵守】：
 
-1. **表格處理**：
+1. **頁碼**：
+   - page 欄位必須使用 {start_page} 到 {end_page} 之間的數字
+   - 根據內容在 PDF 中的物理位置決定頁碼
+
+2. **表格處理**：
    - tables.data 必須包含表格的【完整內容】，每一列都要提取
-   - 格式範例：「1.南港昆陽置地廣場停車場 2.南港遠東智慧科學園區管理委員會停車場 3.玉成國小地下停車場...」
    - 不要只寫摘要，要列出所有數據
 
-2. **圖片/地圖處理**：
+3. **圖片/地圖處理**：
    - 提取圖片中所有可見的文字標註、地名、路名、標記
    - images.description 要詳細描述圖片內容和所有文字
 
-3. **內容提取**：
+4. **內容提取**：
    - blocks.content 必須包含完整文字，不可截斷或省略
    - 每頁的所有文字區塊都要提取，不限數量
 
-4. **key_value_pairs**：
+5. **key_value_pairs**：
    - 從表格和內容中提取所有重要的鍵值對
-   - 例如：停車場資訊要提取「編號1」:「南港昆陽置地廣場停車場」
-
-5. **summary**：
-   - 摘要要包含具體資訊，不要只說「提到了XXX」
-   - 要說明具體有哪些內容
 
 只輸出 JSON，不要其他文字"""
 
@@ -143,7 +147,7 @@ class UniversalOCRAgent:
             return 1
     
     def _fix_page_numbers(self, result: Dict, page_offset: int):
-        """修正批次處理後的頁碼
+        """修正批次處理後的頁碼（舊方法，保留兼容性）
         
         Args:
             result: 批次處理的結果
@@ -172,11 +176,74 @@ class UniversalOCRAgent:
             if "page" in img and isinstance(img["page"], int):
                 img["page"] += page_offset
 
+    def _validate_page_numbers(self, result: Dict, start_page: int, end_page: int):
+        """驗證並修正頁碼，確保在有效範圍內
+        
+        Args:
+            result: 批次處理的結果
+            start_page: 該批次的起始頁碼
+            end_page: 該批次的結束頁碼
+        """
+        def fix_page(page_value, default_page):
+            """修正單個頁碼值"""
+            if not isinstance(page_value, int):
+                try:
+                    page_value = int(page_value)
+                except (ValueError, TypeError):
+                    return default_page
+            
+            # 如果頁碼不在有效範圍內，嘗試修正
+            if page_value < start_page or page_value > end_page:
+                # 可能是 AI 返回了從 1 開始的相對頁碼
+                if 1 <= page_value <= (end_page - start_page + 1):
+                    return page_value + start_page - 1
+                # 否則使用預設值
+                return default_page
+            return page_value
+        
+        # 用於追蹤當前處理的頁碼（按順序遞增）
+        current_page = start_page
+        
+        # 修正 blocks 的頁碼
+        for i, block in enumerate(result.get("blocks", [])):
+            if "page" in block:
+                fixed_page = fix_page(block["page"], current_page)
+                if fixed_page != block["page"]:
+                    logger.debug(f"Block {i}: 頁碼 {block['page']} -> {fixed_page}")
+                block["page"] = fixed_page
+                current_page = fixed_page  # 更新當前頁碼參考
+        
+        # 修正 key_value_pairs 的頁碼
+        for kv in result.get("key_value_pairs", []):
+            if "page" in kv:
+                kv["page"] = fix_page(kv["page"], start_page)
+        
+        # 修正 tables 的頁碼
+        for table in result.get("tables", []):
+            if "page" in table:
+                table["page"] = fix_page(table["page"], start_page)
+        
+        # 修正 images 的頁碼
+        for img in result.get("images", []):
+            if "page" in img:
+                img["page"] = fix_page(img["page"], start_page)
+
     def _process_batch(self, pdf_data: bytes, start_page: int, end_page: int) -> Dict:
-        """處理單一批次"""
+        """處理單一批次
+        
+        Args:
+            pdf_data: PDF 資料
+            start_page: 原始 PDF 的起始頁碼（用於告訴 AI）
+            end_page: 原始 PDF 的結束頁碼（用於告訴 AI）
+        """
+        total_batch_pages = end_page - start_page + 1
+        second_page = start_page + 1 if total_batch_pages > 1 else start_page
+        
         prompt = self.EXTRACTION_PROMPT.format(
             start_page=start_page,
-            end_page=end_page
+            end_page=end_page,
+            total_batch_pages=total_batch_pages,
+            second_page=second_page
         )
         
         pdf_part = Part.from_data(data=pdf_data, mime_type="application/pdf")
@@ -337,12 +404,11 @@ class UniversalOCRAgent:
                 # 處理這批（最多重試2次）
                 for attempt in range(2):
                     try:
-                        # 注意：分割後的 PDF 頁碼從 1 開始，但我們需要告訴 AI 原始頁碼範圍
-                        batch_result = self._process_batch(batch_pdf, 1, end - start + 1)
+                        # 直接告訴 AI 原始頁碼範圍，這樣 AI 返回的頁碼就是正確的
+                        batch_result = self._process_batch(batch_pdf, start, end)
                         
-                        # 修正頁碼：將返回的頁碼轉換為原始 PDF 頁碼
-                        page_offset = start - 1
-                        self._fix_page_numbers(batch_result, page_offset)
+                        # 驗證並修正頁碼：確保頁碼在有效範圍內
+                        self._validate_page_numbers(batch_result, start, end)
                         
                         results.append(batch_result)
                         batch_info.append({"start": start, "end": end})

@@ -10,6 +10,10 @@ const uploadResult = ref<OCRResponse | null>(null)
 const saveToDb = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
+// 取消控制器
+const abortController = ref<AbortController | null>(null)
+const isCancelling = ref(false)
+
 // 進度狀態
 const progress = ref({
   totalPages: 0,
@@ -107,13 +111,36 @@ const handleProgress = (data: OCRProgress) => {
 const handleUpload = async () => {
   if (!selectedFile.value) return
 
+  // 創建新的 AbortController
+  abortController.value = new AbortController()
+  isCancelling.value = false
+
   const result = await uploadPDFWithProgress(
     selectedFile.value,
     saveToDb.value,
-    handleProgress
+    handleProgress,
+    abortController.value.signal
   )
+  
   if (result) {
     uploadResult.value = result
+  }
+  
+  // 清理
+  abortController.value = null
+}
+
+// 取消辨識
+const handleCancel = () => {
+  if (abortController.value) {
+    // 立即中斷請求
+    abortController.value.abort()
+    abortController.value = null
+    
+    // 立即重置狀態（保留一些資訊顯示）
+    isCancelling.value = false
+    progress.value.status = 'cancelled'
+    progress.value.message = '已取消辨識'
   }
 }
 
@@ -245,11 +272,17 @@ const blockTypeIcon = (type: string): string => {
     </UCard>
 
     <!-- 處理中狀態（含進度條） -->
-    <UCard v-if="loading" class="mb-4 sm:mb-6">
+    <UCard v-if="loading || isCancelling" class="mb-4 sm:mb-6">
       <div class="py-6 sm:py-8">
         <div class="text-center mb-6">
-          <UIcon name="i-lucide-loader-2" class="w-10 h-10 sm:w-12 sm:h-12 mx-auto mb-4 animate-spin text-primary" />
-          <p class="text-base sm:text-lg font-medium">AI 正在分析文件...</p>
+          <UIcon 
+            :name="isCancelling ? 'i-lucide-x-circle' : 'i-lucide-loader-2'" 
+            class="w-10 h-10 sm:w-12 sm:h-12 mx-auto mb-4" 
+            :class="isCancelling ? 'text-orange-500' : 'animate-spin text-primary'"
+          />
+          <p class="text-base sm:text-lg font-medium">
+            {{ isCancelling ? '正在取消...' : 'AI 正在分析文件...' }}
+          </p>
         </div>
 
         <!-- 進度條 -->
@@ -262,7 +295,8 @@ const blockTypeIcon = (type: string): string => {
           <!-- 進度條本體 -->
           <div class="h-3 bg-muted/30 rounded-full overflow-hidden">
             <div
-              class="h-full bg-primary rounded-full transition-all duration-300 ease-out"
+              class="h-full rounded-full transition-all duration-300 ease-out"
+              :class="isCancelling ? 'bg-orange-500' : 'bg-primary'"
               :style="{ width: `${progress.percent}%` }"
             />
           </div>
@@ -276,17 +310,62 @@ const blockTypeIcon = (type: string): string => {
               <span v-else-if="progress.status === 'completed'">
                 共 {{ progress.totalPages }} 頁處理完成
               </span>
+              <span v-else-if="progress.status === 'cancelled'">
+                已取消辨識
+              </span>
               <span v-else>
                 總共 {{ progress.totalPages }} 頁
               </span>
             </p>
-            <p v-if="progress.totalBatches > 1" class="text-xs text-muted mt-1">
+            <p v-if="progress.totalBatches > 1 && !isCancelling" class="text-xs text-muted mt-1">
               批次 {{ progress.batch }} / {{ progress.totalBatches }}
             </p>
           </div>
         </div>
 
-        <p class="text-xs text-muted mt-4 text-center">大型文件會自動分批處理，請耐心等候</p>
+        <!-- 取消按鈕 -->
+        <div class="mt-6 text-center">
+          <UButton
+            v-if="!isCancelling"
+            icon="i-lucide-x"
+            color="error"
+            variant="soft"
+            size="sm"
+            @click="handleCancel"
+          >
+            取消辨識
+          </UButton>
+          <p v-else class="text-xs text-orange-500">正在停止處理...</p>
+        </div>
+
+        <p v-if="!isCancelling" class="text-xs text-muted mt-4 text-center">
+          大型文件會自動分批處理，請耐心等候
+        </p>
+      </div>
+    </UCard>
+
+    <!-- 已取消狀態 -->
+    <UCard v-if="progress.status === 'cancelled' && !loading && !uploadResult" class="mb-4 sm:mb-6">
+      <div class="text-center py-6">
+        <UIcon name="i-lucide-x-circle" class="w-12 h-12 mx-auto mb-4 text-orange-500" />
+        <h3 class="text-lg font-medium mb-2">已取消辨識</h3>
+        <p class="text-sm text-muted mb-4">辨識程序已停止，您可以重新上傳或選擇其他檔案</p>
+        <div class="flex gap-2 justify-center">
+          <UButton
+            icon="i-lucide-refresh-cw"
+            variant="outline"
+            @click="resetUpload"
+          >
+            重新上傳
+          </UButton>
+          <!-- <UButton
+            v-if="selectedFile"
+            icon="i-lucide-play"
+            @click="handleUpload"
+          >
+            重新開始
+          </UButton> -->
+        </div>
       </div>
     </UCard>
 
@@ -299,23 +378,44 @@ const blockTypeIcon = (type: string): string => {
         icon="i-lucide-check-circle"
         title="辨識完成！"
         :description="`文件已成功處理，共 ${uploadResult.total_pages} 頁，耗時 ${uploadResult.processing_time?.total_formatted || '未知'}`"
-        class="mb-4 sm:mb-6"
+        class="mb-4"
       />
+
+      <!-- 操作按鈕區 - 顯眼獨立 -->
+      <div class="mb-4 sm:mb-6 flex flex-col sm:flex-row items-stretch sm:items-center gap-3 p-4 bg-primary/5 rounded-lg border border-primary/20">
+        <UButton
+          to="/ask"
+          icon="i-lucide-message-circle"
+          size="lg"
+          class="flex-1 sm:flex-none font-semibold"
+        >
+          開始問答
+        </UButton>
+        <div class="hidden sm:block text-muted">|</div>
+        <div class="flex gap-2">
+          <UButton
+            to="/documents"
+            icon="i-lucide-folder-open"
+            variant="outline"
+            size="sm"
+          >
+            查看所有文件
+          </UButton>
+          <UButton
+            icon="i-lucide-refresh-cw"
+            variant="ghost"
+            size="sm"
+            @click="resetUpload"
+          >
+            上傳新文件
+          </UButton>
+        </div>
+      </div>
 
       <!-- 基本資訊 -->
       <UCard class="mb-4 sm:mb-6">
         <template #header>
-          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-            <h2 class="text-base sm:text-lg font-semibold">文件資訊</h2>
-            <UButton
-              icon="i-lucide-refresh-cw"
-              variant="ghost"
-              size="xs"
-              @click="resetUpload"
-            >
-              上傳新文件
-            </UButton>
-          </div>
+          <h2 class="text-base sm:text-lg font-semibold">文件資訊</h2>
         </template>
 
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
@@ -400,24 +500,6 @@ const blockTypeIcon = (type: string): string => {
         </div>
       </UCard>
 
-      <!-- 操作按鈕 - 響應式 -->
-      <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-center">
-        <UButton
-          to="/documents"
-          icon="i-lucide-folder-open"
-          variant="outline"
-          class="w-full sm:w-auto"
-        >
-          查看所有文件
-        </UButton>
-        <UButton
-          to="/ask"
-          icon="i-lucide-message-circle"
-          class="w-full sm:w-auto"
-        >
-          開始問答
-        </UButton>
-      </div>
     </div>
   </div>
 </template>

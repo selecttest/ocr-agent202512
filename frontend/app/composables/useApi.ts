@@ -181,11 +181,16 @@ export const useApi = () => {
 
   /**
    * 上傳 PDF 進行 OCR（含進度追蹤）
+   * @param file 要上傳的 PDF 檔案
+   * @param saveToDb 是否儲存到資料庫
+   * @param onProgress 進度回調函數
+   * @param abortSignal 可選的 AbortSignal 用於取消請求
    */
   const uploadPDFWithProgress = async (
     file: File,
     saveToDb = true,
-    onProgress: (progress: OCRProgress) => void
+    onProgress: (progress: OCRProgress) => void,
+    abortSignal?: AbortSignal
   ): Promise<OCRResponse | null> => {
     loading.value = true
     error.value = null
@@ -198,7 +203,8 @@ export const useApi = () => {
         `${API_BASE_URL}/ocr/upload-stream?save_to_db=${saveToDb}`,
         {
           method: 'POST',
-          body: formData
+          body: formData,
+          signal: abortSignal
         }
       )
 
@@ -216,9 +222,21 @@ export const useApi = () => {
       let buffer = ''
       let result: OCRResponse | null = null
 
+      // 監聽取消信號
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => {
+          reader.cancel()
+        })
+      }
+
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+
+        // 檢查是否已取消
+        if (abortSignal?.aborted) {
+          throw new Error('已取消辨識')
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n\n')
@@ -244,7 +262,12 @@ export const useApi = () => {
 
       return result
     } catch (e) {
-      error.value = e instanceof Error ? e.message : '上傳失敗'
+      // 如果是取消導致的錯誤，不顯示錯誤訊息
+      if (e instanceof Error && (e.name === 'AbortError' || e.message === '已取消辨識')) {
+        error.value = null
+      } else {
+        error.value = e instanceof Error ? e.message : '上傳失敗'
+      }
       return null
     } finally {
       loading.value = false

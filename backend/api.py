@@ -188,10 +188,11 @@ async def ocr_upload(file: UploadFile = File(...), save_to_db: bool = True):
 
 
 @app.post("/ocr/upload-stream")
-async def ocr_upload_stream(file: UploadFile = File(...), save_to_db: bool = True):
+async def ocr_upload_stream(request: Request, file: UploadFile = File(...), save_to_db: bool = True):
     """
     上傳 PDF 並進行 OCR（串流進度）
     返回 Server-Sent Events 格式的進度更新
+    支援客戶端取消：當連接斷開時會停止處理
     """
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="只支援 PDF 檔案")
@@ -199,14 +200,25 @@ async def ocr_upload_stream(file: UploadFile = File(...), save_to_db: bool = Tru
     filename = file.filename
     content = await file.read()
     
+    # 用於追蹤是否已取消
+    cancelled = {"value": False}
+    
     async def generate_progress():
         try:
             agent = get_ocr_agent()
             
-            # 使用帶進度回調的處理方法
-            async for progress in process_with_progress(agent, content, filename, save_to_db):
+            # 使用帶進度回調的處理方法，傳入取消狀態
+            async for progress in process_with_progress(agent, content, filename, save_to_db, request, cancelled):
+                # 檢查是否已取消
+                if cancelled["value"]:
+                    logger.info("客戶端已取消，停止處理")
+                    yield f"data: {json.dumps({'type': 'cancelled', 'message': '已取消辨識'}, ensure_ascii=False)}\n\n"
+                    break
                 yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
                 
+        except asyncio.CancelledError:
+            logger.info("串流已被取消")
+            yield f"data: {json.dumps({'type': 'cancelled', 'message': '已取消辨識'}, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.error(f"串流處理錯誤: {str(e)}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
@@ -222,10 +234,27 @@ async def ocr_upload_stream(file: UploadFile = File(...), save_to_db: bool = Tru
     )
 
 
-async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filename: str, save_to_db: bool):
-    """處理 PDF 並產生進度更新"""
+async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filename: str, save_to_db: bool, request: Request = None, cancelled: dict = None):
+    """處理 PDF 並產生進度更新
+    
+    Args:
+        agent: OCR 代理
+        pdf_data: PDF 資料
+        filename: 檔案名稱
+        save_to_db: 是否儲存到資料庫
+        request: FastAPI Request 物件，用於檢測客戶端斷開
+        cancelled: 取消狀態字典
+    """
     import fitz
     start_time = time.time()
+    
+    # 檢查是否已取消的輔助函數
+    async def check_cancelled():
+        if request and await request.is_disconnected():
+            if cancelled:
+                cancelled["value"] = True
+            return True
+        return cancelled and cancelled.get("value", False)
     
     # 取得總頁數
     doc = fitz.open(stream=pdf_data, filetype="pdf")
@@ -280,6 +309,11 @@ async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filen
         batch_num = 0
         
         for start in range(1, total_pages + 1, batch_size):
+            # 每批次開始前檢查是否已取消
+            if await check_cancelled():
+                logger.info(f"處理已取消，停止在批次 {batch_num}")
+                return
+            
             end = min(start + batch_size - 1, total_pages)
             batch_num += 1
             
@@ -296,19 +330,63 @@ async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filen
                 "status": "processing"
             }
             
-            # 處理這批
+            # 再次檢查是否已取消（在耗時操作前）
+            if await check_cancelled():
+                logger.info(f"處理已取消，停止在批次 {batch_num}")
+                return
+            
+            # 處理這批 - 使用後台線程執行，每秒檢查取消狀態
             batch_pdf = agent._split_pdf(pdf_data, start, end)
             
             try:
-                batch_result = agent._process_batch(batch_pdf, 1, end - start + 1)
-                page_offset = start - 1
-                agent._fix_page_numbers(batch_result, page_offset)
-                results.append(batch_result)
+                # 在後台線程執行 AI 處理
+                import concurrent.futures
+                loop = asyncio.get_event_loop()
+                
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = loop.run_in_executor(
+                        executor,
+                        lambda: agent._process_batch(batch_pdf, start, end)
+                    )
+                    
+                    # 每秒檢查一次取消狀態
+                    while not future.done():
+                        try:
+                            # 等待最多 1 秒
+                            batch_result = await asyncio.wait_for(
+                                asyncio.shield(future),
+                                timeout=1.0
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            # 檢查是否已取消
+                            if await check_cancelled():
+                                logger.info(f"處理已取消，中斷批次 {batch_num}")
+                                future.cancel()
+                                return
+                            # 繼續等待
+                            continue
+                    
+                    # 取得結果
+                    if future.done() and not future.cancelled():
+                        batch_result = future.result()
+                        # 驗證並修正頁碼
+                        agent._validate_page_numbers(batch_result, start, end)
+                        results.append(batch_result)
+                        
+            except concurrent.futures.CancelledError:
+                logger.info(f"批次 {batch_num} 已被取消")
+                return
             except Exception as e:
                 logger.error(f"批次 {batch_num} 處理失敗: {e}")
             
-            # 讓出控制權以便發送事件
+            # 讓出控制權以便發送事件和檢查取消
             await asyncio.sleep(0.01)
+        
+        # 最終檢查是否已取消
+        if await check_cancelled():
+            logger.info("處理已取消，不合併結果")
+            return
         
         # 合併結果
         merged = agent._merge_results(results, total_pages)
@@ -343,6 +421,11 @@ async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filen
             "percent": 100,
             "status": "completed"
         }
+    
+    # 檢查是否已取消，取消則不儲存
+    if await check_cancelled():
+        logger.info("處理已取消，不儲存到資料庫")
+        return
     
     # 儲存到資料庫
     document_id = None
