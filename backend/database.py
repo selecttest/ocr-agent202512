@@ -39,6 +39,28 @@ class Database:
             logger.error(f"資料庫連線失敗: {e}")
             return False
     
+    def ensure_connection(self):
+        """確保連線有效，如果斷開則重新連線"""
+        try:
+            if self.conn is None or self.conn.closed:
+                logger.info("連線已斷開，正在重新連線...")
+                return self.connect()
+            
+            # 測試連線是否有效
+            cur = self.conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return True
+        except Exception as e:
+            logger.warning(f"連線測試失敗，正在重新連線: {e}")
+            try:
+                self.conn = psycopg2.connect(**DB_CONFIG)
+                logger.info("重新連線成功")
+                return True
+            except Exception as e2:
+                logger.error(f"重新連線失敗: {e2}")
+                return False
+    
     def close(self):
         """關閉連線"""
         if self.conn:
@@ -102,10 +124,32 @@ class Database:
                     kv.get("value", ""),
                     kv.get("page")
                 ))
-            logger.info(f"已儲存 {len(key_values)} 個 key-value pairs")
+            
+            # 3.1 將 header 和 section_title 類型的 blocks 也存入 key_values
+            # 這樣可以更好地理解文件結構
+            section_count = 0
+            for block in blocks:
+                block_type = block.get("type", "")
+                if block_type in ("header", "section_title"):
+                    content = block.get("content", "").strip()
+                    if content:
+                        cur.execute("""
+                            INSERT INTO key_values (document_id, key, value, page)
+                            VALUES (%s, %s, %s, %s)
+                        """, (
+                            doc_id,
+                            f"章節標題({block_type})",
+                            content,
+                            block.get("page")
+                        ))
+                        section_count += 1
+            
+            total_kv = len(key_values) + section_count
+            logger.info(f"已儲存 {total_kv} 個 key-value pairs（含 {section_count} 個章節標題）")
             
             # 4. 儲存 images
             images_summary = ocr_result.get("images_summary")
+            image_count = 0
             if images_summary:
                 items = []
                 if isinstance(images_summary, dict):
@@ -114,6 +158,7 @@ class Database:
                     items = images_summary
                 
                 for img in items:
+                    # 存入 images 表
                     cur.execute("""
                         INSERT INTO images (document_id, image_type, page, region, description)
                         VALUES (%s, %s, %s, %s, %s)
@@ -124,7 +169,23 @@ class Database:
                         img.get("region", ""),
                         img.get("description", "")
                     ))
-                logger.info(f"已儲存 {len(items)} 個 images")
+                    
+                    # 【新增】把圖片描述也存入 key_values，以便搜索
+                    description = img.get("description", "").strip()
+                    if description:
+                        img_type = img.get("type", "圖片")
+                        cur.execute("""
+                            INSERT INTO key_values (document_id, key, value, page)
+                            VALUES (%s, %s, %s, %s)
+                        """, (
+                            doc_id,
+                            f"圖片內容({img_type})",
+                            description,
+                            img.get("page")
+                        ))
+                        image_count += 1
+                
+                logger.info(f"已儲存 {len(items)} 個 images，{image_count} 個圖片描述加入 key_values")
             
             self.conn.commit()
             return str(doc_id)
@@ -189,6 +250,10 @@ class Database:
     def search_blocks(self, query_embedding: List[float], limit: int = 10, document_ids: List[str] = None) -> List[Dict]:
         """向量搜尋相關區塊
         
+        搜索策略：
+        1. 優先搜索 header/section_title 類型（權重加成）
+        2. 再搜索一般內容
+        
         Args:
             query_embedding: 查詢向量
             limit: 回傳數量上限
@@ -202,6 +267,7 @@ class Database:
             
             if document_ids and len(document_ids) > 0:
                 # 有指定文件 ID，只搜尋這些文件
+                # 使用 CASE 給 header/section_title 類型加權
                 cur.execute("""
                     SELECT 
                         b.id,
@@ -212,14 +278,20 @@ class Database:
                         b.content,
                         d.filename,
                         d.detected_type,
-                        1 - (b.embedding <=> %s::vector) as similarity
+                        1 - (b.embedding <=> %s::vector) as base_similarity,
+                        CASE 
+                            WHEN b.block_type IN ('header', 'section_title') THEN 
+                                (1 - (b.embedding <=> %s::vector)) * 1.2
+                            ELSE 
+                                1 - (b.embedding <=> %s::vector)
+                        END as similarity
                     FROM blocks b
                     JOIN documents d ON b.document_id = d.id
                     WHERE b.embedding IS NOT NULL
                       AND b.document_id = ANY(%s::uuid[])
-                    ORDER BY b.embedding <=> %s::vector
+                    ORDER BY similarity DESC
                     LIMIT %s
-                """, (query_embedding, document_ids, query_embedding, limit))
+                """, (query_embedding, query_embedding, query_embedding, document_ids, limit))
             else:
                 # 沒有指定文件 ID，搜尋所有文件
                 cur.execute("""
@@ -232,18 +304,136 @@ class Database:
                         b.content,
                         d.filename,
                         d.detected_type,
-                        1 - (b.embedding <=> %s::vector) as similarity
+                        1 - (b.embedding <=> %s::vector) as base_similarity,
+                        CASE 
+                            WHEN b.block_type IN ('header', 'section_title') THEN 
+                                (1 - (b.embedding <=> %s::vector)) * 1.2
+                            ELSE 
+                                1 - (b.embedding <=> %s::vector)
+                        END as similarity
                     FROM blocks b
                     JOIN documents d ON b.document_id = d.id
                     WHERE b.embedding IS NOT NULL
-                    ORDER BY b.embedding <=> %s::vector
+                    ORDER BY similarity DESC
                     LIMIT %s
-                """, (query_embedding, query_embedding, limit))
+                """, (query_embedding, query_embedding, query_embedding, limit))
             
             return [dict(row) for row in cur.fetchall()]
             
         except Exception as e:
             logger.error(f"向量搜尋失敗: {e}")
+            return []
+    
+    def search_key_values(
+        self, 
+        keywords: List[str], 
+        document_ids: List[str] = None
+    ) -> List[Dict]:
+        """用關鍵字搜索 key_values 表
+        
+        Args:
+            keywords: 關鍵字列表
+            document_ids: 可選，限定搜尋的文件 ID 列表
+        """
+        if not self.ensure_connection():
+            return []
+        
+        if not keywords:
+            return []
+        
+        try:
+            cur = self.conn.cursor(cursor_factory=RealDictCursor)
+            
+            # 建立 LIKE 條件（任一關鍵字匹配 key 或 value）
+            like_conditions = []
+            params = []
+            
+            for keyword in keywords:
+                like_conditions.append("(kv.key ILIKE %s OR kv.value ILIKE %s)")
+                params.extend([f"%{keyword}%", f"%{keyword}%"])
+            
+            like_clause = " OR ".join(like_conditions)
+            
+            if document_ids and len(document_ids) > 0:
+                query = f"""
+                    SELECT 
+                        kv.id,
+                        kv.document_id,
+                        kv.key,
+                        kv.value,
+                        kv.page,
+                        d.filename
+                    FROM key_values kv
+                    JOIN documents d ON kv.document_id = d.id
+                    WHERE kv.document_id = ANY(%s::uuid[])
+                      AND ({like_clause})
+                    ORDER BY kv.page
+                """
+                params = [document_ids] + params
+            else:
+                query = f"""
+                    SELECT 
+                        kv.id,
+                        kv.document_id,
+                        kv.key,
+                        kv.value,
+                        kv.page,
+                        d.filename
+                    FROM key_values kv
+                    JOIN documents d ON kv.document_id = d.id
+                    WHERE {like_clause}
+                    ORDER BY kv.page
+                """
+            
+            cur.execute(query, params)
+            results = [dict(row) for row in cur.fetchall()]
+            logger.info(f"key_values 關鍵字搜索: {keywords} → 找到 {len(results)} 筆")
+            return results
+            
+        except Exception as e:
+            logger.error(f"key_values 搜索失敗: {e}")
+            return []
+    
+    def get_blocks_by_page_range(
+        self, 
+        document_id: str, 
+        start_page: int, 
+        end_page: int
+    ) -> List[Dict]:
+        """取得指定文件、指定頁碼範圍的所有 blocks
+        
+        Args:
+            document_id: 文件 ID
+            start_page: 起始頁碼
+            end_page: 結束頁碼
+        """
+        if not self.ensure_connection():
+            return []
+        
+        try:
+            cur = self.conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("""
+                SELECT 
+                    b.id,
+                    b.document_id,
+                    b.block_type,
+                    b.page,
+                    b.region,
+                    b.content,
+                    d.filename
+                FROM blocks b
+                JOIN documents d ON b.document_id = d.id
+                WHERE b.document_id = %s
+                  AND b.page >= %s
+                  AND b.page <= %s
+                ORDER BY b.page, b.id
+            """, (document_id, start_page, end_page))
+            
+            return [dict(row) for row in cur.fetchall()]
+            
+        except Exception as e:
+            logger.error(f"取得頁面區塊失敗: {e}")
             return []
     
     def delete_document(self, doc_id: str) -> bool:
@@ -303,6 +493,218 @@ class Database:
             "failed": failed_count,
             "deleted_ids": deleted_ids
         }
+
+
+    def init_query_logs_table(self):
+        """初始化問答記錄表"""
+        if not self.ensure_connection():
+            logger.error("無法連線到資料庫，無法初始化問答記錄表")
+            return False
+        
+        try:
+            cur = self.conn.cursor()
+            
+            # 建立問答記錄表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS query_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    question TEXT NOT NULL,
+                    answer TEXT,
+                    document_ids UUID[],
+                    search_keywords TEXT[],
+                    matched_blocks JSONB,
+                    similarity_scores FLOAT[],
+                    ip_address VARCHAR(45),
+                    user_agent TEXT,
+                    query_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    response_time_ms INTEGER,
+                    status VARCHAR(20) DEFAULT 'success'
+                );
+                
+                -- 建立索引加速查詢
+                CREATE INDEX IF NOT EXISTS idx_query_logs_time ON query_logs(query_time DESC);
+                CREATE INDEX IF NOT EXISTS idx_query_logs_ip ON query_logs(ip_address);
+                CREATE INDEX IF NOT EXISTS idx_query_logs_document_ids ON query_logs USING GIN(document_ids);
+            """)
+            
+            self.conn.commit()
+            logger.info("問答記錄表初始化成功")
+            return True
+            
+        except Exception as e:
+            self.conn.rollback()
+            logger.error(f"初始化問答記錄表失敗: {e}")
+            return False
+    
+    def log_query(
+        self,
+        question: str,
+        answer: str = None,
+        document_ids: List[str] = None,
+        search_keywords: List[str] = None,
+        matched_blocks: List[Dict] = None,
+        similarity_scores: List[float] = None,
+        ip_address: str = None,
+        user_agent: str = None,
+        response_time_ms: int = None,
+        status: str = "success"
+    ) -> Optional[str]:
+        """記錄問答內容
+        
+        Args:
+            question: 使用者問題
+            answer: AI 回答
+            document_ids: 搜尋的文件 ID 列表
+            search_keywords: 搜尋關鍵字
+            matched_blocks: 匹配的區塊資訊
+            similarity_scores: 相似度分數列表
+            ip_address: 使用者 IP
+            user_agent: 使用者瀏覽器資訊
+            response_time_ms: 回應時間（毫秒）
+            status: 狀態（success/error）
+        
+        Returns:
+            記錄 ID
+        """
+        if not self.ensure_connection():
+            logger.error("無法連線到資料庫，問答記錄未儲存")
+            return None
+        
+        try:
+            cur = self.conn.cursor()
+            
+            # Debug: 印出要儲存的資料
+            logger.info(f"正在儲存問答記錄: question={question[:50]}..., ip={ip_address}")
+            
+            cur.execute("""
+                INSERT INTO query_logs 
+                (question, answer, document_ids, search_keywords, matched_blocks, 
+                 similarity_scores, ip_address, user_agent, response_time_ms, status)
+                VALUES (%s, %s, %s::uuid[], %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                question,
+                answer,
+                document_ids,
+                search_keywords,
+                Json(matched_blocks) if matched_blocks else None,
+                similarity_scores,
+                ip_address,
+                user_agent,
+                response_time_ms,
+                status
+            ))
+            
+            log_id = cur.fetchone()[0]
+            self.conn.commit()
+            logger.info(f"問答記錄已儲存，ID: {log_id}")
+            return str(log_id)
+            
+        except Exception as e:
+            if self.conn:
+                self.conn.rollback()
+            logger.error(f"儲存問答記錄失敗: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+    
+    def get_query_logs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        ip_address: str = None,
+        document_id: str = None,
+        start_time: str = None,
+        end_time: str = None
+    ) -> List[Dict]:
+        """取得問答記錄
+        
+        Args:
+            limit: 回傳數量上限
+            offset: 跳過的記錄數
+            ip_address: 過濾特定 IP
+            document_id: 過濾特定文件
+            start_time: 開始時間 (ISO format)
+            end_time: 結束時間 (ISO format)
+        """
+        if not self.conn:
+            self.connect()
+        
+        try:
+            cur = self.conn.cursor(cursor_factory=RealDictCursor)
+            
+            query = "SELECT * FROM query_logs WHERE 1=1"
+            params = []
+            
+            if ip_address:
+                query += " AND ip_address = %s"
+                params.append(ip_address)
+            
+            if document_id:
+                query += " AND %s = ANY(document_ids)"
+                params.append(document_id)
+            
+            if start_time:
+                query += " AND query_time >= %s"
+                params.append(start_time)
+            
+            if end_time:
+                query += " AND query_time <= %s"
+                params.append(end_time)
+            
+            query += " ORDER BY query_time DESC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+            
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
+            
+        except Exception as e:
+            logger.error(f"取得問答記錄失敗: {e}")
+            return []
+    
+    def get_query_stats(self, days: int = 7) -> Dict:
+        """取得問答統計資料
+        
+        Args:
+            days: 統計天數
+        """
+        if not self.conn:
+            self.connect()
+        
+        try:
+            cur = self.conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_queries,
+                    COUNT(DISTINCT ip_address) as unique_ips,
+                    AVG(response_time_ms) as avg_response_time,
+                    COUNT(CASE WHEN status = 'success' THEN 1 END) as success_count,
+                    COUNT(CASE WHEN status = 'error' THEN 1 END) as error_count
+                FROM query_logs
+                WHERE query_time >= NOW() - INTERVAL '%s days'
+            """, (days,))
+            
+            stats = dict(cur.fetchone())
+            
+            # 每日統計
+            cur.execute("""
+                SELECT 
+                    DATE(query_time) as date,
+                    COUNT(*) as count
+                FROM query_logs
+                WHERE query_time >= NOW() - INTERVAL '%s days'
+                GROUP BY DATE(query_time)
+                ORDER BY date DESC
+            """, (days,))
+            
+            stats["daily_counts"] = [dict(row) for row in cur.fetchall()]
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"取得問答統計失敗: {e}")
+            return {}
 
 
 # 全域資料庫實例

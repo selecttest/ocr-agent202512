@@ -35,30 +35,50 @@ class DocumentResult:
 
 class UniversalOCRAgent:
     
-    SYSTEM_PROMPT = """你是文件分析系統。輸出必須是有效的 JSON。保持簡潔。"""
+    SYSTEM_PROMPT = """你是專業的文件分析系統。請完整提取文件中的所有重要資訊，包括表格每一列數據、圖片中的所有文字標註。輸出必須是有效的 JSON。"""
 
-    EXTRACTION_PROMPT = """分析 PDF 第 {start_page}-{end_page} 頁，輸出 JSON。
+    EXTRACTION_PROMPT = """仔細分析 PDF 第 {start_page}-{end_page} 頁的所有內容，完整提取所有文字資訊，輸出 JSON。
 
 格式：
 {{
   "detected_type": "文件類型",
   "language": "zh-TW",
   "blocks": [
-    {{"id": "b1", "type": "類型", "page": 1, "region": "位置", "content": "內容(限20字)"}}
+    {{"id": "b1", "type": "類型", "page": 1, "region": "位置", "content": "完整內容文字"}}
   ],
-  "key_value_pairs": [{{"key": "鍵", "value": "值", "page": 1}}],
-  "tables": [{{"id": "t1", "page": 1, "summary": "摘要"}}],
-  "images": [{{"id": "i1", "type": "類型", "page": 1, "description": "描述(限15字)"}}],
-  "summary": "摘要(限30字)"
+  "key_value_pairs": [{{"key": "欄位名稱", "value": "欄位值", "page": 1}}],
+  "tables": [{{"id": "t1", "page": 1, "summary": "表格標題", "data": "完整表格內容"}}],
+  "images": [{{"id": "i1", "type": "類型", "page": 1, "description": "圖片完整描述"}}],
+  "summary": "文件完整摘要"
 }}
 
-類型：photo/logo/chart/figure/header/text/list/table/form_field
+類型：photo/logo/chart/figure/header/section_title/text/list/table/form_field/map/diagram
 位置：左上/中上/右上/左中/中央/右中/左下/中下/右下
 
-規則：
-1. 每頁最多5個重要區塊
-2. content限20字，description限15字
-3. 只輸出JSON"""
+【重要規則 - 務必遵守】：
+
+1. **表格處理**：
+   - tables.data 必須包含表格的【完整內容】，每一列都要提取
+   - 格式範例：「1.南港昆陽置地廣場停車場 2.南港遠東智慧科學園區管理委員會停車場 3.玉成國小地下停車場...」
+   - 不要只寫摘要，要列出所有數據
+
+2. **圖片/地圖處理**：
+   - 提取圖片中所有可見的文字標註、地名、路名、標記
+   - images.description 要詳細描述圖片內容和所有文字
+
+3. **內容提取**：
+   - blocks.content 必須包含完整文字，不可截斷或省略
+   - 每頁的所有文字區塊都要提取，不限數量
+
+4. **key_value_pairs**：
+   - 從表格和內容中提取所有重要的鍵值對
+   - 例如：停車場資訊要提取「編號1」:「南港昆陽置地廣場停車場」
+
+5. **summary**：
+   - 摘要要包含具體資訊，不要只說「提到了XXX」
+   - 要說明具體有哪些內容
+
+只輸出 JSON，不要其他文字"""
 
     def __init__(
         self,
@@ -121,6 +141,36 @@ class UniversalOCRAgent:
         except Exception as e:
             logger.error(f"取得頁數失敗: {e}")
             return 1
+    
+    def _fix_page_numbers(self, result: Dict, page_offset: int):
+        """修正批次處理後的頁碼
+        
+        Args:
+            result: 批次處理的結果
+            page_offset: 頁碼偏移量（原始起始頁 - 1）
+        """
+        if page_offset == 0:
+            return  # 不需要修正
+        
+        # 修正 blocks 的頁碼
+        for block in result.get("blocks", []):
+            if "page" in block and isinstance(block["page"], int):
+                block["page"] += page_offset
+        
+        # 修正 key_value_pairs 的頁碼
+        for kv in result.get("key_value_pairs", []):
+            if "page" in kv and isinstance(kv["page"], int):
+                kv["page"] += page_offset
+        
+        # 修正 tables 的頁碼
+        for table in result.get("tables", []):
+            if "page" in table and isinstance(table["page"], int):
+                table["page"] += page_offset
+        
+        # 修正 images 的頁碼
+        for img in result.get("images", []):
+            if "page" in img and isinstance(img["page"], int):
+                img["page"] += page_offset
 
     def _process_batch(self, pdf_data: bytes, start_page: int, end_page: int) -> Dict:
         """處理單一批次"""
@@ -271,6 +321,7 @@ class UniversalOCRAgent:
             
             # 分批處理
             results = []
+            batch_info = []  # 記錄每個批次的起始頁碼
             batch_num = 0
             successful_batches = 0
             failed_batches = 0
@@ -286,8 +337,15 @@ class UniversalOCRAgent:
                 # 處理這批（最多重試2次）
                 for attempt in range(2):
                     try:
-                        batch_result = self._process_batch(batch_pdf, start, end)
+                        # 注意：分割後的 PDF 頁碼從 1 開始，但我們需要告訴 AI 原始頁碼範圍
+                        batch_result = self._process_batch(batch_pdf, 1, end - start + 1)
+                        
+                        # 修正頁碼：將返回的頁碼轉換為原始 PDF 頁碼
+                        page_offset = start - 1
+                        self._fix_page_numbers(batch_result, page_offset)
+                        
                         results.append(batch_result)
+                        batch_info.append({"start": start, "end": end})
                         successful_batches += 1
                         logger.info(f"第 {start} - {end} 頁處理完成")
                         break
