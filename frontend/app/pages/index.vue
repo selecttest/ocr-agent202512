@@ -57,6 +57,40 @@ const features = [
       </div>
     </section>
 
+    <!-- How it works - 響應式 -->
+    <section class="how-it-works-section py-12 sm:py-16 px-4">
+      <div class="text-center mb-8 sm:mb-12">
+        <h2 class="text-2xl sm:text-3xl font-bold mb-2 sm:mb-4">使用流程</h2>
+        <p class="text-sm sm:text-base text-muted">三個步驟，輕鬆完成文件問答</p>
+      </div>
+
+      <div class="steps-container">
+        <div class="step-item">
+          <div class="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+            <UIcon name="i-lucide-upload" class="w-7 h-7 sm:w-8 sm:h-8 text-primary" />
+          </div>
+          <h3 class="text-base sm:text-lg font-semibold mb-2">1. 上傳文件</h3>
+          <p class="text-xs sm:text-sm text-muted">支援 PDF 格式，拖拉或點擊上傳</p>
+        </div>
+
+        <div class="step-item">
+          <div class="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+            <UIcon name="i-lucide-cpu" class="w-7 h-7 sm:w-8 sm:h-8 text-primary" />
+          </div>
+          <h3 class="text-base sm:text-lg font-semibold mb-2">2. AI 處理</h3>
+          <p class="text-xs sm:text-sm text-muted">Gemini 自動辨識文字、表格、圖片</p>
+        </div>
+
+        <div class="step-item">
+          <div class="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+            <UIcon name="i-lucide-message-circle" class="w-7 h-7 sm:w-8 sm:h-8 text-primary" />
+          </div>
+          <h3 class="text-base sm:text-lg font-semibold mb-2">3. 智能問答</h3>
+          <p class="text-xs sm:text-sm text-muted">針對文件提問，AI 引用來源回答</p>
+        </div>
+      </div>
+    </section>
+    
     <!-- Features Section - 響應式 -->
     <section class="py-12 sm:py-16 px-4 bg-muted/30">
       <div class="max-w-6xl mx-auto">
@@ -79,43 +113,7 @@ const features = [
           </UCard>
         </div>
       </div>
-    </section>
-
-    <!-- How it works - 響應式 -->
-    <section class="py-12 sm:py-16 px-4">
-      <div class="max-w-4xl mx-auto">
-        <div class="text-center mb-8 sm:mb-12">
-          <h2 class="text-2xl sm:text-3xl font-bold mb-2 sm:mb-4">使用流程</h2>
-          <p class="text-sm sm:text-base text-muted">三個步驟，輕鬆完成文件問答</p>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8">
-          <div class="text-center">
-            <div class="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 rounded-full bg-primary/10 flex items-center justify-center">
-              <UIcon name="i-lucide-upload" class="w-7 h-7 sm:w-8 sm:h-8 text-primary" />
-            </div>
-            <h3 class="text-base sm:text-lg font-semibold mb-2">1. 上傳文件</h3>
-            <p class="text-xs sm:text-sm text-muted">支援 PDF 格式，拖拉或點擊上傳</p>
-          </div>
-
-          <div class="text-center">
-            <div class="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 rounded-full bg-primary/10 flex items-center justify-center">
-              <UIcon name="i-lucide-cpu" class="w-7 h-7 sm:w-8 sm:h-8 text-primary" />
-            </div>
-            <h3 class="text-base sm:text-lg font-semibold mb-2">2. AI 處理</h3>
-            <p class="text-xs sm:text-sm text-muted">Gemini 自動辨識文字、表格、圖片</p>
-          </div>
-
-          <div class="text-center">
-            <div class="w-14 h-14 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 rounded-full bg-primary/10 flex items-center justify-center">
-              <UIcon name="i-lucide-message-circle" class="w-7 h-7 sm:w-8 sm:h-8 text-primary" />
-            </div>
-            <h3 class="text-base sm:text-lg font-semibold mb-2">3. 智能問答</h3>
-            <p class="text-xs sm:text-sm text-muted">針對文件提問，AI 引用來源回答</p>
-          </div>
-        </div>
-      </div>
-    </section>
+    </section> 
 
     <!-- CTA - 響應式 -->
     <section class="py-12 sm:py-16 px-4 bg-primary/5">
