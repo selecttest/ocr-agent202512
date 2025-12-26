@@ -300,7 +300,7 @@ async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filen
             "total_pages": total_pages,
             "batch": 1,
             "total_batches": 1,
-            "percent": 100,
+             "percent": 100,
             "status": "completed"
         }
     else:
@@ -371,7 +371,7 @@ async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filen
                     if future.done() and not future.cancelled():
                         batch_result = future.result()
                         # 驗證並修正頁碼
-                        agent._validate_page_numbers(batch_result, start, end)
+                        #agent._validate_page_numbers(batch_result, start, end)
                         results.append(batch_result)
                         
             except concurrent.futures.CancelledError:
@@ -762,7 +762,7 @@ async def ask_question(request: QuestionRequest, req: Request):
         
         # 4. 呼叫 Gemini 生成回答
         from vertexai.generative_models import GenerativeModel
-        model = GenerativeModel("gemini-2.0-flash")
+        model = GenerativeModel("gemini-2.0-flash-lite")
         
         prompt = f"""根據以下文件內容回答問題。如果文件中沒有相關資訊，請說明。
 

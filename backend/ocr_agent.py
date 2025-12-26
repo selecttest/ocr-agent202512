@@ -1,5 +1,5 @@
 """
-通用文件 OCR 模組 - 精簡輸出版本
+通用文件 OCR 模組 - 精簡輸出版本（支援並行處理）
 """
 
 import vertexai
@@ -10,6 +10,8 @@ from dataclasses import dataclass, asdict
 import logging
 import fitz  # PyMuPDF
 import time
+import concurrent.futures
+from threading import Lock
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,12 +90,14 @@ class UniversalOCRAgent:
         self,
         project_id: str,
         location: str = "us-central1",
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "gemini-2.0-flash-lite",
         temperature: float = 0.1,
-        max_output_tokens: int = 8192
+        max_output_tokens: int = 8192,
+        max_workers: int = 4  # 並行處理數量
     ):
         self.project_id = project_id
         self.location = location
+        self.max_workers = max_workers
         
         logger.info(f"初始化 Vertex AI: project={project_id}, location={location}")
         vertexai.init(project=project_id, location=location)
@@ -108,18 +112,17 @@ class UniversalOCRAgent:
             "max_output_tokens": max_output_tokens
         }
         
-        logger.info("OCR Agent 初始化完成")
+        # 用於線程安全的日誌輸出
+        self._log_lock = Lock()
+        
+        logger.info(f"OCR Agent 初始化完成（並行數: {max_workers}）")
 
     def _get_batch_size(self, total_pages: int) -> int:
-        """根據總頁數決定每批處理的頁數 - 更保守的設定"""
-        if total_pages <= 10:
+        """根據總頁數決定每批處理的頁數 - 保守設定避免輸出截斷"""
+        if total_pages <= 3:
             return total_pages
-        elif total_pages <= 30:
-            return 5
-        elif total_pages <= 100:
-            return 8
         else:
-            return 10  # 大文件每批最多10頁
+            return 3  # 統一每批 3 頁，確保不超過 token 限制
 
     def _split_pdf(self, pdf_data: bytes, start_page: int, end_page: int) -> bytes:
         """擷取 PDF 的指定頁面範圍"""
@@ -145,88 +148,56 @@ class UniversalOCRAgent:
         except Exception as e:
             logger.error(f"取得頁數失敗: {e}")
             return 1
-    
-    def _fix_page_numbers(self, result: Dict, page_offset: int):
-        """修正批次處理後的頁碼（舊方法，保留兼容性）
-        
-        Args:
-            result: 批次處理的結果
-            page_offset: 頁碼偏移量（原始起始頁 - 1）
-        """
-        if page_offset == 0:
-            return  # 不需要修正
-        
-        # 修正 blocks 的頁碼
-        for block in result.get("blocks", []):
-            if "page" in block and isinstance(block["page"], int):
-                block["page"] += page_offset
-        
-        # 修正 key_value_pairs 的頁碼
-        for kv in result.get("key_value_pairs", []):
-            if "page" in kv and isinstance(kv["page"], int):
-                kv["page"] += page_offset
-        
-        # 修正 tables 的頁碼
-        for table in result.get("tables", []):
-            if "page" in table and isinstance(table["page"], int):
-                table["page"] += page_offset
-        
-        # 修正 images 的頁碼
-        for img in result.get("images", []):
-            if "page" in img and isinstance(img["page"], int):
-                img["page"] += page_offset
 
-    def _validate_page_numbers(self, result: Dict, start_page: int, end_page: int):
-        """驗證並修正頁碼，確保在有效範圍內
+    def _force_fix_page_numbers(self, result: Dict, start_page: int, end_page: int):
+        """強制修正頁碼：把 AI 回傳的相對頁碼轉換成絕對頁碼
         
         Args:
-            result: 批次處理的結果
-            start_page: 該批次的起始頁碼
-            end_page: 該批次的結束頁碼
+            result: AI 回傳的結果
+            start_page: 該批次的起始頁碼（例如 6）
+            end_page: 該批次的結束頁碼（例如 10）
         """
-        def fix_page(page_value, default_page):
-            """修正單個頁碼值"""
+        batch_size = end_page - start_page + 1
+        
+        def fix_page(page_value):
+            """修正單個頁碼"""
+            # 確保是整數
             if not isinstance(page_value, int):
                 try:
                     page_value = int(page_value)
                 except (ValueError, TypeError):
-                    return default_page
+                    return start_page
             
-            # 如果頁碼不在有效範圍內，嘗試修正
-            if page_value < start_page or page_value > end_page:
-                # 可能是 AI 返回了從 1 開始的相對頁碼
-                if 1 <= page_value <= (end_page - start_page + 1):
-                    return page_value + start_page - 1
-                # 否則使用預設值
-                return default_page
-            return page_value
+            # 情況 1：AI 回傳相對頁碼（1, 2, 3...）→ 需要轉換
+            if 1 <= page_value <= batch_size:
+                return page_value + start_page - 1
+            
+            # 情況 2：AI 回傳的頁碼已經正確（6, 7, 8...）→ 直接用
+            if start_page <= page_value <= end_page:
+                return page_value
+            
+            # 情況 3：頁碼異常 → 用起始頁
+            return start_page
         
-        # 用於追蹤當前處理的頁碼（按順序遞增）
-        current_page = start_page
-        
-        # 修正 blocks 的頁碼
-        for i, block in enumerate(result.get("blocks", [])):
+        # 修正 blocks
+        for block in result.get("blocks", []):
             if "page" in block:
-                fixed_page = fix_page(block["page"], current_page)
-                if fixed_page != block["page"]:
-                    logger.debug(f"Block {i}: 頁碼 {block['page']} -> {fixed_page}")
-                block["page"] = fixed_page
-                current_page = fixed_page  # 更新當前頁碼參考
+                block["page"] = fix_page(block["page"])
         
-        # 修正 key_value_pairs 的頁碼
+        # 修正 key_value_pairs
         for kv in result.get("key_value_pairs", []):
             if "page" in kv:
-                kv["page"] = fix_page(kv["page"], start_page)
+                kv["page"] = fix_page(kv["page"])
         
-        # 修正 tables 的頁碼
+        # 修正 tables
         for table in result.get("tables", []):
             if "page" in table:
-                table["page"] = fix_page(table["page"], start_page)
+                table["page"] = fix_page(table["page"])
         
-        # 修正 images 的頁碼
+        # 修正 images
         for img in result.get("images", []):
             if "page" in img:
-                img["page"] = fix_page(img["page"], start_page)
+                img["page"] = fix_page(img["page"])
 
     def _process_batch(self, pdf_data: bytes, start_page: int, end_page: int) -> Dict:
         """處理單一批次
@@ -252,8 +223,62 @@ class UniversalOCRAgent:
             [pdf_part, prompt],
             generation_config=self.generation_config
         )
+
+        result = self._parse_response(response.text)
         
-        return self._parse_response(response.text)
+        # 強制修正頁碼
+        self._force_fix_page_numbers(result, start_page, end_page)
+        
+        return result
+
+    def _process_batch_with_retry(self, pdf_data: bytes, start_page: int, end_page: int, batch_num: int) -> Dict:
+        """處理單一批次（含重試機制，用於並行處理）
+        
+        Args:
+            pdf_data: 原始完整 PDF 資料
+            start_page: 起始頁碼
+            end_page: 結束頁碼
+            batch_num: 批次編號（用於日誌）
+            
+        Returns:
+            Dict: 包含處理結果和狀態
+        """
+        # 切割 PDF
+        batch_pdf = self._split_pdf(pdf_data, start_page, end_page)
+        
+        with self._log_lock:
+            logger.info(f"[批次 {batch_num}] 開始處理第 {start_page}-{end_page} 頁...")
+        
+        # 最多重試 2 次
+        for attempt in range(2):
+            try:
+                result = self._process_batch(batch_pdf, start_page, end_page)
+                
+                with self._log_lock:
+                    logger.info(f"[批次 {batch_num}] 第 {start_page}-{end_page} 頁處理完成 ✓")
+                
+                return {
+                    "success": True,
+                    "batch_num": batch_num,
+                    "start_page": start_page,
+                    "end_page": end_page,
+                    "result": result
+                }
+                
+            except Exception as e:
+                if attempt == 1:  # 第二次失敗
+                    with self._log_lock:
+                        logger.error(f"[批次 {batch_num}] 第 {start_page}-{end_page} 頁處理失敗: {e}")
+                    return {
+                        "success": False,
+                        "batch_num": batch_num,
+                        "start_page": start_page,
+                        "end_page": end_page,
+                        "error": str(e)
+                    }
+                else:
+                    with self._log_lock:
+                        logger.warning(f"[批次 {batch_num}] 第 {start_page}-{end_page} 頁第一次嘗試失敗，重試中...")
 
     def _merge_results(self, results: List[Dict], total_pages: int) -> Dict:
         """合併多批次的結果"""
@@ -386,44 +411,58 @@ class UniversalOCRAgent:
                     processing_time=processing_time
                 )
             
-            # 分批處理
-            results = []
-            batch_info = []  # 記錄每個批次的起始頁碼
+            # 分批處理 - 使用並行
+            batch_tasks = []
             batch_num = 0
-            successful_batches = 0
-            failed_batches = 0
             
             for start in range(1, total_pages + 1, batch_size):
                 end = min(start + batch_size - 1, total_pages)
                 batch_num += 1
-                logger.info(f"處理第 {start} - {end} 頁（批次 {batch_num}）...")
-                
-                # 擷取該範圍的頁面
-                batch_pdf = self._split_pdf(pdf_data, start, end)
-                
-                # 處理這批（最多重試2次）
-                for attempt in range(2):
-                    try:
-                        # 直接告訴 AI 原始頁碼範圍，這樣 AI 返回的頁碼就是正確的
-                        batch_result = self._process_batch(batch_pdf, start, end)
-                        
-                        # 驗證並修正頁碼：確保頁碼在有效範圍內
-                        self._validate_page_numbers(batch_result, start, end)
-                        
-                        results.append(batch_result)
-                        batch_info.append({"start": start, "end": end})
-                        successful_batches += 1
-                        logger.info(f"第 {start} - {end} 頁處理完成")
-                        break
-                    except Exception as e:
-                        if attempt == 1:  # 第二次失敗
-                            logger.error(f"第 {start} - {end} 頁處理失敗: {e}")
-                            failed_batches += 1
-                        else:
-                            logger.warning(f"第 {start} - {end} 頁第一次嘗試失敗，重試中...")
+                batch_tasks.append({
+                    "batch_num": batch_num,
+                    "start_page": start,
+                    "end_page": end
+                })
             
-            if not results:
+            total_batches = len(batch_tasks)
+            logger.info(f"總共 {total_batches} 個批次，使用 {self.max_workers} 個並行處理")
+            
+            # 並行處理所有批次
+            batch_results = []
+            successful_batches = 0
+            failed_batches = 0
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                # 提交所有任務
+                future_to_batch = {
+                    executor.submit(
+                        self._process_batch_with_retry,
+                        pdf_data,
+                        task["start_page"],
+                        task["end_page"],
+                        task["batch_num"]
+                    ): task
+                    for task in batch_tasks
+                }
+                
+                # 收集結果
+                for future in concurrent.futures.as_completed(future_to_batch):
+                    batch_result = future.result()
+                    
+                    if batch_result["success"]:
+                        batch_results.append(batch_result)
+                        successful_batches += 1
+                    else:
+                        failed_batches += 1
+            
+            if not batch_results:
                 return self._error_result("所有批次處理都失敗")
+            
+            # 按照頁碼順序排序結果
+            batch_results.sort(key=lambda x: x["start_page"])
+            
+            # 提取實際的處理結果
+            results = [br["result"] for br in batch_results]
             
             # 合併結果
             logger.info(f"合併結果：成功 {successful_batches} 批，失敗 {failed_batches} 批")
@@ -433,9 +472,10 @@ class UniversalOCRAgent:
             processing_time = {
                 "total_seconds": round(elapsed, 2),
                 "total_formatted": self._format_time(elapsed),
-                "batch_count": batch_num,
+                "batch_count": total_batches,
                 "successful_batches": successful_batches,
-                "failed_batches": failed_batches
+                "failed_batches": failed_batches,
+                "parallel_workers": self.max_workers
             }
             
             return DocumentResult(
