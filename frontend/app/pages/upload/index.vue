@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import type { OCRResponse } from '~/composables/useApi'
+import type { OCRResponse, OCRProgress } from '~/composables/useApi'
 
-const { uploadPDF, loading, error } = useApi()
+const { uploadPDFWithProgress, loading, error } = useApi()
 
 // 狀態
 const selectedFile = ref<File | null>(null)
@@ -9,6 +9,18 @@ const isDragging = ref(false)
 const uploadResult = ref<OCRResponse | null>(null)
 const saveToDb = ref(true)
 const fileInputRef = ref<HTMLInputElement | null>(null)
+
+// 進度狀態
+const progress = ref({
+  totalPages: 0,
+  currentPage: 0,
+  endPage: 0,
+  percent: 0,
+  batch: 0,
+  totalBatches: 0,
+  status: '',
+  message: ''
+})
 
 // 觸發檔案選擇
 const triggerFileSelect = () => {
@@ -40,13 +52,66 @@ const selectFile = (file: File) => {
   }
   selectedFile.value = file
   uploadResult.value = null
+  // 重置進度
+  progress.value = {
+    totalPages: 0,
+    currentPage: 0,
+    endPage: 0,
+    percent: 0,
+    batch: 0,
+    totalBatches: 0,
+    status: '',
+    message: ''
+  }
+}
+
+// 處理進度更新
+const handleProgress = (data: OCRProgress) => {
+  switch (data.type) {
+    case 'start':
+      progress.value.totalPages = data.total_pages || 0
+      progress.value.status = 'starting'
+      progress.value.message = `開始處理，共 ${data.total_pages} 頁`
+      break
+    case 'info':
+      progress.value.totalBatches = data.total_batches || 1
+      break
+    case 'progress':
+      progress.value.currentPage = data.current_page || 0
+      progress.value.endPage = data.end_page || 0
+      progress.value.percent = data.percent || 0
+      progress.value.batch = data.batch || 0
+      progress.value.status = data.status || 'processing'
+      if (data.status === 'processing') {
+        progress.value.message = `正在處理第 ${data.current_page}-${data.end_page} 頁（批次 ${data.batch}/${progress.value.totalBatches}）`
+      } else if (data.status === 'completed') {
+        progress.value.message = 'OCR 辨識完成'
+      }
+      break
+    case 'status':
+      progress.value.message = data.message || ''
+      break
+    case 'complete':
+      progress.value.percent = 100
+      progress.value.status = 'completed'
+      progress.value.message = '處理完成！'
+      break
+    case 'error':
+      progress.value.status = 'error'
+      progress.value.message = data.message || '處理失敗'
+      break
+  }
 }
 
 // 上傳檔案
 const handleUpload = async () => {
   if (!selectedFile.value) return
 
-  const result = await uploadPDF(selectedFile.value, saveToDb.value)
+  const result = await uploadPDFWithProgress(
+    selectedFile.value,
+    saveToDb.value,
+    handleProgress
+  )
   if (result) {
     uploadResult.value = result
   }
@@ -56,6 +121,16 @@ const handleUpload = async () => {
 const resetUpload = () => {
   selectedFile.value = null
   uploadResult.value = null
+  progress.value = {
+    totalPages: 0,
+    currentPage: 0,
+    endPage: 0,
+    percent: 0,
+    batch: 0,
+    totalBatches: 0,
+    status: '',
+    message: ''
+  }
 }
 
 // 格式化檔案大小
@@ -169,12 +244,49 @@ const blockTypeIcon = (type: string): string => {
       />
     </UCard>
 
-    <!-- 處理中狀態 -->
+    <!-- 處理中狀態（含進度條） -->
     <UCard v-if="loading" class="mb-4 sm:mb-6">
-      <div class="text-center py-6 sm:py-8">
-        <UIcon name="i-lucide-loader-2" class="w-10 h-10 sm:w-12 sm:h-12 mx-auto mb-4 animate-spin text-primary" />
-        <p class="text-base sm:text-lg font-medium">AI 正在分析文件...</p>
-        <p class="text-xs sm:text-sm text-muted mt-2">大型文件可能需要較長時間，請耐心等候</p>
+      <div class="py-6 sm:py-8">
+        <div class="text-center mb-6">
+          <UIcon name="i-lucide-loader-2" class="w-10 h-10 sm:w-12 sm:h-12 mx-auto mb-4 animate-spin text-primary" />
+          <p class="text-base sm:text-lg font-medium">AI 正在分析文件...</p>
+        </div>
+
+        <!-- 進度條 -->
+        <div class="max-w-md mx-auto px-4">
+          <div class="flex justify-between text-xs sm:text-sm text-muted mb-2">
+            <span>{{ progress.message || '準備中...' }}</span>
+            <span class="font-medium">{{ progress.percent }}%</span>
+          </div>
+          
+          <!-- 進度條本體 -->
+          <div class="h-3 bg-muted/30 rounded-full overflow-hidden">
+            <div
+              class="h-full bg-primary rounded-full transition-all duration-300 ease-out"
+              :style="{ width: `${progress.percent}%` }"
+            />
+          </div>
+
+          <!-- 詳細資訊 -->
+          <div v-if="progress.totalPages > 0" class="mt-3 text-center">
+            <p class="text-xs sm:text-sm text-muted">
+              <span v-if="progress.status === 'processing'">
+                處理中：第 {{ progress.currentPage }}-{{ progress.endPage }} 頁 / 共 {{ progress.totalPages }} 頁
+              </span>
+              <span v-else-if="progress.status === 'completed'">
+                共 {{ progress.totalPages }} 頁處理完成
+              </span>
+              <span v-else>
+                總共 {{ progress.totalPages }} 頁
+              </span>
+            </p>
+            <p v-if="progress.totalBatches > 1" class="text-xs text-muted mt-1">
+              批次 {{ progress.batch }} / {{ progress.totalBatches }}
+            </p>
+          </div>
+        </div>
+
+        <p class="text-xs text-muted mt-4 text-center">大型文件會自動分批處理，請耐心等候</p>
       </div>
     </UCard>
 

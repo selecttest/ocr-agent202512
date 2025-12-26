@@ -100,6 +100,29 @@ export interface BatchDeleteResponse {
   deleted_ids: string[]
 }
 
+/** OCR 處理進度 */
+export interface OCRProgress {
+  type: 'start' | 'info' | 'progress' | 'status' | 'complete' | 'error'
+  // start
+  total_pages?: number
+  filename?: string
+  // info
+  batch_size?: number
+  total_batches?: number
+  // progress
+  current_page?: number
+  end_page?: number
+  batch?: number
+  percent?: number
+  status?: string
+  // status
+  message?: string
+  // complete
+  result?: OCRResponse
+  // error
+  error?: string
+}
+
 // ==================== API Composable ====================
 
 export const useApi = () => {
@@ -148,6 +171,78 @@ export const useApi = () => {
       }
 
       return await response.json()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '上傳失敗'
+      return null
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /**
+   * 上傳 PDF 進行 OCR（含進度追蹤）
+   */
+  const uploadPDFWithProgress = async (
+    file: File,
+    saveToDb = true,
+    onProgress: (progress: OCRProgress) => void
+  ): Promise<OCRResponse | null> => {
+    loading.value = true
+    error.value = null
+
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const response = await fetch(
+        `${API_BASE_URL}/ocr/upload-stream?save_to_db=${saveToDb}`,
+        {
+          method: 'POST',
+          body: formData
+        }
+      )
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || '上傳失敗')
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) {
+        throw new Error('無法讀取串流')
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let result: OCRResponse | null = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6)) as OCRProgress
+              onProgress(data)
+
+              if (data.type === 'complete' && data.result) {
+                result = data.result
+              } else if (data.type === 'error') {
+                throw new Error(data.message || '處理失敗')
+              }
+            } catch (parseError) {
+              console.error('解析進度失敗:', parseError)
+            }
+          }
+        }
+      }
+
+      return result
     } catch (e) {
       error.value = e instanceof Error ? e.message : '上傳失敗'
       return null
@@ -337,6 +432,7 @@ export const useApi = () => {
     // 方法
     healthCheck,
     uploadPDF,
+    uploadPDFWithProgress,
     getDocuments,
     getDocument,
     deleteDocument,

@@ -4,11 +4,14 @@ OCR API 服務 - 含資料庫儲存
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 import logging
 import time
+import json
+import asyncio
 
 from ocr_agent import UniversalOCRAgent
 from database import db
@@ -182,6 +185,194 @@ async def ocr_upload(file: UploadFile = File(...), save_to_db: bool = True):
     except Exception as e:
         logger.error(f"處理錯誤: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ocr/upload-stream")
+async def ocr_upload_stream(file: UploadFile = File(...), save_to_db: bool = True):
+    """
+    上傳 PDF 並進行 OCR（串流進度）
+    返回 Server-Sent Events 格式的進度更新
+    """
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="只支援 PDF 檔案")
+    
+    filename = file.filename
+    content = await file.read()
+    
+    async def generate_progress():
+        try:
+            agent = get_ocr_agent()
+            
+            # 使用帶進度回調的處理方法
+            async for progress in process_with_progress(agent, content, filename, save_to_db):
+                yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"
+                
+        except Exception as e:
+            logger.error(f"串流處理錯誤: {str(e)}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return StreamingResponse(
+        generate_progress(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+async def process_with_progress(agent: UniversalOCRAgent, pdf_data: bytes, filename: str, save_to_db: bool):
+    """處理 PDF 並產生進度更新"""
+    import fitz
+    start_time = time.time()
+    
+    # 取得總頁數
+    doc = fitz.open(stream=pdf_data, filetype="pdf")
+    total_pages = len(doc)
+    doc.close()
+    
+    yield {
+        "type": "start",
+        "total_pages": total_pages,
+        "filename": filename
+    }
+    
+    # 決定批次大小
+    batch_size = agent._get_batch_size(total_pages)
+    total_batches = (total_pages + batch_size - 1) // batch_size
+    
+    yield {
+        "type": "info",
+        "batch_size": batch_size,
+        "total_batches": total_batches
+    }
+    
+    # 如果可以一次處理完
+    if batch_size >= total_pages:
+        yield {
+            "type": "progress",
+            "current_page": 1,
+            "end_page": total_pages,
+            "total_pages": total_pages,
+            "batch": 1,
+            "total_batches": 1,
+            "percent": 0,
+            "status": "processing"
+        }
+        
+        result = agent.process_bytes(pdf_data)
+        result_dict = result.to_dict()
+        
+        yield {
+            "type": "progress",
+            "current_page": total_pages,
+            "end_page": total_pages,
+            "total_pages": total_pages,
+            "batch": 1,
+            "total_batches": 1,
+            "percent": 100,
+            "status": "completed"
+        }
+    else:
+        # 分批處理
+        results = []
+        batch_num = 0
+        
+        for start in range(1, total_pages + 1, batch_size):
+            end = min(start + batch_size - 1, total_pages)
+            batch_num += 1
+            
+            # 發送進度
+            percent = int((start - 1) / total_pages * 100)
+            yield {
+                "type": "progress",
+                "current_page": start,
+                "end_page": end,
+                "total_pages": total_pages,
+                "batch": batch_num,
+                "total_batches": total_batches,
+                "percent": percent,
+                "status": "processing"
+            }
+            
+            # 處理這批
+            batch_pdf = agent._split_pdf(pdf_data, start, end)
+            
+            try:
+                batch_result = agent._process_batch(batch_pdf, 1, end - start + 1)
+                page_offset = start - 1
+                agent._fix_page_numbers(batch_result, page_offset)
+                results.append(batch_result)
+            except Exception as e:
+                logger.error(f"批次 {batch_num} 處理失敗: {e}")
+            
+            # 讓出控制權以便發送事件
+            await asyncio.sleep(0.01)
+        
+        # 合併結果
+        merged = agent._merge_results(results, total_pages)
+        
+        elapsed = time.time() - start_time
+        processing_time = {
+            "total_seconds": round(elapsed, 2),
+            "total_formatted": agent._format_time(elapsed),
+            "batch_count": batch_num
+        }
+        
+        result_dict = {
+            "success": True,
+            "total_pages": total_pages,
+            "detected_type": merged.get("detected_type", "unknown"),
+            "language": merged.get("language", "unknown"),
+            "blocks": merged.get("blocks", []),
+            "full_text": merged.get("text_summary", ""),
+            "key_value_pairs": merged.get("key_value_pairs", []),
+            "tables": merged.get("tables", []),
+            "images_summary": merged.get("images_summary"),
+            "processing_time": processing_time
+        }
+        
+        yield {
+            "type": "progress",
+            "current_page": total_pages,
+            "end_page": total_pages,
+            "total_pages": total_pages,
+            "batch": total_batches,
+            "total_batches": total_batches,
+            "percent": 100,
+            "status": "completed"
+        }
+    
+    # 儲存到資料庫
+    document_id = None
+    if save_to_db and result_dict.get("success"):
+        yield {
+            "type": "status",
+            "message": "正在儲存到資料庫..."
+        }
+        
+        try:
+            document_id = db.save_document(result_dict, filename)
+            logger.info(f"文件已儲存到資料庫，ID: {document_id}")
+            
+            yield {
+                "type": "status",
+                "message": "正在生成向量索引..."
+            }
+            
+            update_embeddings_for_document(document_id)
+            
+        except Exception as e:
+            logger.error(f"儲存到資料庫失敗: {e}")
+    
+    result_dict["document_id"] = document_id
+    
+    # 發送最終結果
+    yield {
+        "type": "complete",
+        "result": result_dict
+    }
 
 
 @app.get("/documents", response_model=DocumentListResponse)
