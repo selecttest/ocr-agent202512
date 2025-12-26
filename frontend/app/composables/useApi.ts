@@ -2,8 +2,7 @@
  * API 服務層 - 連接後端 OCR API
  */
 
-// API 基礎 URL（可透過環境變數設定）
-const API_BASE_URL = 'http://localhost:8000'
+// API 基礎 URL 會在 useApi() 中從 runtimeConfig 讀取
 
 // ==================== 類型定義 ====================
 
@@ -104,6 +103,10 @@ export interface BatchDeleteResponse {
 // ==================== API Composable ====================
 
 export const useApi = () => {
+  // 從 runtimeConfig 讀取 API URL
+  const config = useRuntimeConfig()
+  const API_BASE_URL = config.public.apiBase || 'http://localhost:8000'
+  
   const loading = ref(false)
   const error = ref<string | null>(null)
 

@@ -11,6 +11,13 @@ export default defineNuxtConfig({
 
   css: ['~/assets/css/main.css'],
 
+  // API 設定（可透過環境變數 NUXT_PUBLIC_API_BASE 覆蓋）
+  runtimeConfig: {
+    public: {
+      apiBase: process.env.NUXT_PUBLIC_API_BASE || 'http://localhost:8000'
+    }
+  },
+
   routeRules: {
     '/': { prerender: true }
   },
