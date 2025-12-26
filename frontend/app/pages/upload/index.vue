@@ -8,6 +8,12 @@ const selectedFile = ref<File | null>(null)
 const isDragging = ref(false)
 const uploadResult = ref<OCRResponse | null>(null)
 const saveToDb = ref(true)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+
+// 觸發檔案選擇
+const triggerFileSelect = () => {
+  fileInputRef.value?.click()
+}
 
 // 處理檔案選擇
 const handleFileSelect = (event: Event) => {
@@ -101,17 +107,21 @@ const blockTypeIcon = (type: string): string => {
           <UIcon name="i-lucide-upload-cloud" class="w-12 h-12 sm:w-16 sm:h-16 mx-auto mb-3 sm:mb-4 text-muted" />
           <p class="text-base sm:text-lg mb-2">拖放 PDF 檔案到這裡</p>
           <p class="text-xs sm:text-sm text-muted mb-4">或點擊下方按鈕選擇檔案</p>
-          <label>
-            <UButton icon="i-lucide-file-plus" variant="outline" size="sm">
-              選擇檔案
-            </UButton>
-            <input
-              type="file"
-              accept=".pdf"
-              class="hidden"
-              @change="handleFileSelect"
-            >
-          </label>
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept=".pdf"
+            class="hidden"
+            @change="handleFileSelect"
+          >
+          <UButton 
+            icon="i-lucide-file-plus" 
+            variant="outline" 
+            size="sm"
+            @click="triggerFileSelect"
+          >
+            選擇檔案
+          </UButton>
         </div>
 
         <div v-else class="flex items-center justify-center gap-3 sm:gap-4">
