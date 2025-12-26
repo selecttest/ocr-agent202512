@@ -130,8 +130,18 @@ const handleUpload = async () => {
   abortController.value = null
 }
 
-// 取消辨識
-const handleCancel = () => {
+// 取消確認對話框
+const showCancelConfirm = ref(false)
+
+// 顯示取消確認
+const handleCancelClick = () => {
+  showCancelConfirm.value = true
+}
+
+// 確認取消辨識
+const confirmCancel = () => {
+  showCancelConfirm.value = false
+  
   if (abortController.value) {
     // 立即中斷請求
     abortController.value.abort()
@@ -142,6 +152,11 @@ const handleCancel = () => {
     progress.value.status = 'cancelled'
     progress.value.message = '已取消辨識'
   }
+}
+
+// 取消（不停止辨識）
+const dismissCancelConfirm = () => {
+  showCancelConfirm.value = false
 }
 
 // 重置
@@ -331,7 +346,7 @@ const blockTypeIcon = (type: string): string => {
             color="error"
             variant="soft"
             size="sm"
-            @click="handleCancel"
+            @click="handleCancelClick"
           >
             取消辨識
           </UButton>
@@ -501,5 +516,49 @@ const blockTypeIcon = (type: string): string => {
       </UCard>
 
     </div>
+
+    <!-- 取消確認對話框 -->
+    <UModal v-model:open="showCancelConfirm">
+      <template #content>
+        <UCard>
+          <template #header>
+            <div class="flex items-center gap-2 text-orange-500">
+              <UIcon name="i-lucide-alert-triangle" class="w-5 h-5" />
+              <span class="font-semibold">確認取消辨識</span>
+            </div>
+          </template>
+
+          <div class="space-y-3">
+            <p class="text-sm">
+              確定要取消目前的辨識作業嗎？
+            </p>
+            <p class="text-xs text-muted">
+              目前進度：{{ progress.percent }}%（第 {{ progress.currentPage }}-{{ progress.endPage }} 頁 / 共 {{ progress.totalPages }} 頁）
+            </p>
+            <p class="text-xs text-orange-600 dark:text-orange-400">
+              取消後需要重新上傳檔案才能再次辨識
+            </p>
+          </div>
+
+          <template #footer>
+            <div class="flex justify-end gap-2">
+              <UButton
+                variant="ghost"
+                @click="dismissCancelConfirm"
+              >
+                繼續辨識
+              </UButton>
+              <UButton
+                color="error"
+                icon="i-lucide-x"
+                @click="confirmCancel"
+              >
+                確認取消
+              </UButton>
+            </div>
+          </template>
+        </UCard>
+      </template>
+    </UModal>
   </div>
 </template>
