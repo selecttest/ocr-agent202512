@@ -90,6 +90,17 @@ const formatDate = (dateStr: string): string => {
 
       <template #right>
         <div class="flex items-center gap-2">
+          <!-- AI文件問答按鈕 -->
+          <UButton
+            to="/ask"
+            icon="i-lucide-message-circle"
+            variant="ghost"
+            size="sm"
+            class="hidden sm:flex"
+          >
+            <span class="hidden lg:inline">AI文件問答</span>
+          </UButton>
+          
           <!-- 檔案庫按鈕 -->
           <UButton
             icon="i-lucide-library"
