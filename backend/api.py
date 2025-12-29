@@ -859,8 +859,9 @@ async def get_query_stats(days: int = 7):
 
 
 def update_embeddings_for_document(doc_id: str):
-    """為特定文件的 blocks 生成 embedding"""
+    """為特定文件的 blocks 生成 embedding（批次處理優化）"""
     import psycopg2
+    from psycopg2.extras import execute_batch
     
     DB_HOST = os.environ.get("DB_HOST")
     DB_PASSWORD = os.environ.get("DB_PASSWORD")
@@ -878,28 +879,65 @@ def update_embeddings_for_document(doc_id: str):
     )
     cur = conn.cursor()
     
-    # 取得該文件的 blocks
+    # 取得該文件的 blocks（不含 embedding 的）
     cur.execute("""
         SELECT id, content FROM blocks 
-        WHERE document_id = %s AND content IS NOT NULL AND content != ''
+        WHERE document_id = %s 
+          AND embedding IS NULL
+          AND content IS NOT NULL 
+          AND content != ''
+        ORDER BY id
     """, (doc_id,))
     blocks = cur.fetchall()
     
-    logger.info(f"為文件 {doc_id} 生成 {len(blocks)} 個 embeddings")
+    if not blocks:
+        logger.info(f"文件 {doc_id} 的所有 blocks 已有 embedding")
+        cur.close()
+        conn.close()
+        return
     
-    for block_id, content in blocks:
-        embedding = embedding_service.get_embedding(content)
-        if embedding:
-            cur.execute(
-                "UPDATE blocks SET embedding = %s WHERE id = %s",
-                (embedding, block_id)
-            )
+    logger.info(f"為文件 {doc_id} 批次生成 {len(blocks)} 個 embeddings")
     
-    conn.commit()
+    # 批次處理：每批 100 個（Vertex AI 限制）
+    batch_size = 100
+    total_updated = 0
+    
+    for i in range(0, len(blocks), batch_size):
+        batch = blocks[i:i+batch_size]
+        block_ids = [b[0] for b in batch]
+        contents = [b[1] for b in batch]
+        
+        # 批次生成 embeddings
+        try:
+            embeddings = embedding_service.get_embeddings_batch(contents)
+            
+            # 批次更新資料庫
+            update_data = [
+                (emb, block_id) 
+                for emb, block_id in zip(embeddings, block_ids) 
+                if emb is not None
+            ]
+            
+            if update_data:
+                execute_batch(
+                    cur,
+                    "UPDATE blocks SET embedding = %s::vector WHERE id = %s",
+                    update_data,
+                    page_size=100
+                )
+                total_updated += len(update_data)
+                conn.commit()
+                logger.info(f"已更新 {total_updated}/{len(blocks)} 個 blocks")
+            
+        except Exception as e:
+            logger.error(f"批次 {i//batch_size + 1} 處理失敗: {e}")
+            conn.rollback()
+            # 繼續處理下一批
+    
     cur.close()
     conn.close()
     
-    logger.info(f"文件 {doc_id} 的 embeddings 生成完成")
+    logger.info(f"文件 {doc_id} 的 embeddings 生成完成（共 {total_updated} 個）")
 
 
 @app.on_event("startup")

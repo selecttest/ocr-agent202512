@@ -1,8 +1,9 @@
 """
-更新資料庫中的 Embedding
+更新資料庫中的 Embedding（批次處理優化版本）
 """
 
 import psycopg2
+from psycopg2.extras import execute_batch
 from embedding import embedding_service
 import logging
 import os
@@ -29,67 +30,141 @@ def get_db_connection():
 
 
 def update_block_embeddings():
-    """為所有沒有 embedding 的 blocks 生成 embedding"""
+    """為所有沒有 embedding 的 blocks 生成 embedding（批次處理）"""
     conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute("""
         SELECT id, content FROM blocks 
         WHERE embedding IS NULL AND content IS NOT NULL AND content != ''
+        ORDER BY id
     """)
     blocks = cur.fetchall()
     
-    logger.info(f"找到 {len(blocks)} 個需要更新的 blocks")
+    if not blocks:
+        logger.info("沒有需要更新的 blocks")
+        cur.close()
+        conn.close()
+        return
     
-    updated = 0
-    for block_id, content in blocks:
-        embedding = embedding_service.get_embedding(content)
-        if embedding:
-            cur.execute(
-                "UPDATE blocks SET embedding = %s WHERE id = %s",
-                (embedding, block_id)
-            )
-            updated += 1
+    logger.info(f"找到 {len(blocks)} 個需要更新的 blocks，開始批次處理...")
+    
+    # 批次處理：每批 100 個（Vertex AI 限制）
+    batch_size = 100
+    total_updated = 0
+    
+    for i in range(0, len(blocks), batch_size):
+        batch = blocks[i:i+batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(blocks) + batch_size - 1) // batch_size
+        
+        block_ids = [b[0] for b in batch]
+        contents = [b[1] for b in batch]
+        
+        logger.info(f"處理批次 {batch_num}/{total_batches} ({len(batch)} 個 blocks)...")
+        
+        try:
+            # 批次生成 embeddings
+            embeddings = embedding_service.get_embeddings_batch(contents)
             
-            if updated % 10 == 0:
+            # 批次更新資料庫
+            update_data = [
+                (emb, block_id) 
+                for emb, block_id in zip(embeddings, block_ids) 
+                if emb is not None
+            ]
+            
+            if update_data:
+                execute_batch(
+                    cur,
+                    "UPDATE blocks SET embedding = %s::vector WHERE id = %s",
+                    update_data,
+                    page_size=100
+                )
                 conn.commit()
-                logger.info(f"已更新 {updated} 個 blocks")
-    
-    conn.commit()
-    logger.info(f"完成！共更新 {updated} 個 blocks")
+                total_updated += len(update_data)
+                logger.info(f"✓ 批次 {batch_num} 完成，已更新 {total_updated}/{len(blocks)} 個 blocks")
+            else:
+                logger.warning(f"批次 {batch_num} 沒有成功生成任何 embedding")
+                
+        except Exception as e:
+            logger.error(f"批次 {batch_num} 處理失敗: {e}")
+            conn.rollback()
+            # 繼續處理下一批
     
     cur.close()
     conn.close()
+    
+    logger.info(f"完成！共更新 {total_updated}/{len(blocks)} 個 blocks")
 
 
 def update_image_embeddings():
-    """為所有沒有 embedding 的 images 生成 embedding"""
+    """為所有沒有 embedding 的 images 生成 embedding（批次處理）"""
     conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute("""
         SELECT id, description FROM images 
         WHERE embedding IS NULL AND description IS NOT NULL AND description != ''
+        ORDER BY id
     """)
     images = cur.fetchall()
     
-    logger.info(f"找到 {len(images)} 個需要更新的 images")
+    if not images:
+        logger.info("沒有需要更新的 images")
+        cur.close()
+        conn.close()
+        return
     
-    updated = 0
-    for img_id, description in images:
-        embedding = embedding_service.get_embedding(description)
-        if embedding:
-            cur.execute(
-                "UPDATE images SET embedding = %s WHERE id = %s",
-                (embedding, img_id)
-            )
-            updated += 1
+    logger.info(f"找到 {len(images)} 個需要更新的 images，開始批次處理...")
     
-    conn.commit()
-    logger.info(f"完成！共更新 {updated} 個 images")
+    # 批次處理：每批 100 個
+    batch_size = 100
+    total_updated = 0
+    
+    for i in range(0, len(images), batch_size):
+        batch = images[i:i+batch_size]
+        batch_num = i // batch_size + 1
+        total_batches = (len(images) + batch_size - 1) // batch_size
+        
+        image_ids = [img[0] for img in batch]
+        descriptions = [img[1] for img in batch]
+        
+        logger.info(f"處理批次 {batch_num}/{total_batches} ({len(batch)} 個 images)...")
+        
+        try:
+            # 批次生成 embeddings
+            embeddings = embedding_service.get_embeddings_batch(descriptions)
+            
+            # 批次更新資料庫
+            update_data = [
+                (emb, img_id) 
+                for emb, img_id in zip(embeddings, image_ids) 
+                if emb is not None
+            ]
+            
+            if update_data:
+                execute_batch(
+                    cur,
+                    "UPDATE images SET embedding = %s::vector WHERE id = %s",
+                    update_data,
+                    page_size=100
+                )
+                conn.commit()
+                total_updated += len(update_data)
+                logger.info(f"✓ 批次 {batch_num} 完成，已更新 {total_updated}/{len(images)} 個 images")
+            else:
+                logger.warning(f"批次 {batch_num} 沒有成功生成任何 embedding")
+                
+        except Exception as e:
+            logger.error(f"批次 {batch_num} 處理失敗: {e}")
+            conn.rollback()
+            # 繼續處理下一批
     
     cur.close()
     conn.close()
+    
+    logger.info(f"完成！共更新 {total_updated}/{len(images)} 個 images")
 
 
 if __name__ == "__main__":
