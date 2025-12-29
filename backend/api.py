@@ -211,7 +211,7 @@ async def ocr_upload_stream(request: Request, file: UploadFile = File(...), save
             async for progress in process_with_progress(agent, content, filename, save_to_db, request, cancelled):
                 # 檢查是否已取消
                 if cancelled["value"]:
-                    logger.info("客戶端已取消，停止處理")
+                    logger.info("前端已取消，停止處理")
                     yield f"data: {json.dumps({'type': 'cancelled', 'message': '已取消辨識'}, ensure_ascii=False)}\n\n"
                     break
                 yield f"data: {json.dumps(progress, ensure_ascii=False)}\n\n"

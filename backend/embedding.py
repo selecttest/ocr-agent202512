@@ -19,7 +19,7 @@ class EmbeddingService:
     def __init__(self):
         vertexai.init(project=PROJECT_ID, location=LOCATION)
         self.model = TextEmbeddingModel.from_pretrained("text-embedding-004")
-        logger.info("Embedding 服務初始化完成")
+        logger.info("Embedding 初始化完成")
     
     def get_embedding(self, text: str) -> List[float]:
         """取得單一文字的 embedding"""
@@ -32,7 +32,7 @@ class EmbeddingService:
             embeddings = self.model.get_embeddings([text])
             return embeddings[0].values
         except Exception as e:
-            logger.error(f"生成 embedding 失敗: {e}")
+            logger.error(f"embedding 生成失敗: {e}")
             return None
     
     def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:

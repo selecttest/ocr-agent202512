@@ -1,7 +1,7 @@
 """
 更新資料庫中的 Embedding（批次處理優化版本）
 """
-
+##embedding 生成
 import psycopg2
 from psycopg2.extras import execute_batch
 from embedding import embedding_service

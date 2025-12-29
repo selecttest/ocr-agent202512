@@ -414,7 +414,7 @@ curl -X DELETE "http://localhost:8000/documents/{doc_id}"
          ▼
 ┌─────────────────┐
 │  Gemini 2.0     │  ──► 組合 context + 問題
-│  Flash           │      生成自然語言回答
+│  Flash Lite     │      生成自然語言回答
 └────────┬────────┘
          │
          ▼
@@ -544,12 +544,12 @@ sudo journalctl -u ocr-agent -f
 
 | 項目 | 技術 | 版本 |
 |------|------|------|
-| **程式語言** | Python | 3.x |
+| **程式語言** | Python | 3.14.2 |
 | **API 框架** | FastAPI | >=0.104.0 |
 | **ASGI 伺服器** | Uvicorn | >=0.24.0 |
-| **OCR 模型** | Vertex AI Gemini 2.0 Flash | - |
+| **OCR 模型** | Vertex AI Gemini 2.0 Flash Lite  | - |
 | **Embedding 模型** | Vertex AI text-embedding-004 | - |
-| **資料庫** | Cloud SQL PostgreSQL | 15+ |
+| **資料庫** | Cloud SQL PostgreSQL | 17 |
 | **向量搜尋** | pgvector | - |
 | **資料庫驅動** | psycopg2-binary | >=2.9.0 |
 | **PDF 處理** | PyMuPDF (fitz) | >=1.23.0 |
