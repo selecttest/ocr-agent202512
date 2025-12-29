@@ -86,7 +86,7 @@ PDF 文件 OCR 分析 + RAG 向量搜尋問答系統
                              │         ▼                                  │
                              │  ┌──────────────┐  ┌──────────────┐       │
                              │  │ embedding.py │  │Vertex AI     │       │
-                             │  │ (向量生成)   │──│Gemini 2.5    │       │
+                             │  │ (向量生成)   │──│Gemini 2.0    │       │
                              │  │ (批次處理)   │  │Flash         │       │
                              │  └──────────────┘  └──────────────┘       │
                              └────────────────────────────────────────────┘
@@ -338,7 +338,7 @@ curl -X DELETE "http://localhost:8000/documents/{doc_id}"
          │
          ▼
 ┌─────────────────┐
-│  ocr_agent.py   │  ──► Vertex AI Gemini 2.5 Flash Lite
+│  ocr_agent.py   │  ──► Vertex AI Gemini 2.0 Flash
 │  分批處理 PDF    │      (每批 3 頁，並行處理)
 │  頁碼修正       │      支援取消中斷
 └────────┬────────┘
@@ -413,7 +413,7 @@ curl -X DELETE "http://localhost:8000/documents/{doc_id}"
          │
          ▼
 ┌─────────────────┐
-│  Gemini 2.5     │  ──► 組合 context + 問題
+│  Gemini 2.0     │  ──► 組合 context + 問題
 │  Flash Lite     │      生成自然語言回答
 └────────┬────────┘
          │
@@ -547,7 +547,7 @@ sudo journalctl -u ocr-agent -f
 | **程式語言** | Python | 3.14.2 |
 | **API 框架** | FastAPI | >=0.104.0 |
 | **ASGI 伺服器** | Uvicorn | >=0.24.0 |
-| **OCR 模型** | Vertex AI Gemini 2.5 Flash Lite  | - |
+| **OCR 模型** | Vertex AI Gemini 2.0 Flash Lite  | - |
 | **Embedding 模型** | Vertex AI text-embedding-004 | - |
 | **資料庫** | Cloud SQL PostgreSQL | 17 |
 | **向量搜尋** | pgvector | - |

@@ -116,8 +116,8 @@ class Database:
             key_values = ocr_result.get("key_value_pairs", [])
             for kv in key_values:
                 cur.execute("""
-                    INSERT INTO key_values (document_id, key, value, page)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO key_values (document_id, key, value, page, created_time)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                 """, (
                     doc_id,
                     kv.get("key", ""),
@@ -146,8 +146,8 @@ class Database:
                         
                         if not cur.fetchone():
                             cur.execute("""
-                                INSERT INTO key_values (document_id, key, value, page)
-                                VALUES (%s, %s, %s, %s)
+                                INSERT INTO key_values (document_id, key, value, page, created_time)
+                                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                             """, (
                                 doc_id,
                                 key,
@@ -172,8 +172,8 @@ class Database:
                 for img in items:
                     # 存入 images 表
                     cur.execute("""
-                        INSERT INTO images (document_id, image_type, page, region, description)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO images (document_id, image_type, page, region, description, created_time)
+                        VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                     """, (
                         doc_id,
                         img.get("type", ""),
@@ -187,8 +187,8 @@ class Database:
                     if description:
                         img_type = img.get("type", "圖片")
                         cur.execute("""
-                            INSERT INTO key_values (document_id, key, value, page)
-                            VALUES (%s, %s, %s, %s)
+                            INSERT INTO key_values (document_id, key, value, page, created_time)
+                            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                         """, (
                             doc_id,
                             f"圖片內容 - {img_type}",
