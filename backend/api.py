@@ -597,8 +597,8 @@ async def ask_question(request: QuestionRequest, req: Request):
         expanded_blocks = []
         use_block_search = True  # 是否需要搜索 blocks
         
-        # 如果 key_values 找到足夠的結果（>= 2 條），就不搜索 blocks
-        if matched_key_values and len(matched_key_values) >= 2:
+        # 如果 key_values 找到結果（>= 1 條），就不搜索 blocks
+        if matched_key_values and len(matched_key_values) >= 1:
             logger.info(f"key_values 找到 {len(matched_key_values)} 筆結果，跳過 blocks 搜索")
             use_block_search = False
             
@@ -762,7 +762,7 @@ async def ask_question(request: QuestionRequest, req: Request):
         
         # 4. 呼叫 Gemini 生成回答
         from vertexai.generative_models import GenerativeModel
-        model = GenerativeModel("gemini-2.0-flash-lite")
+        model = GenerativeModel("gemini-2.5-flash-lite")
         
         prompt = f"""根據以下文件內容回答問題。如果文件中沒有相關資訊，請說明。
 

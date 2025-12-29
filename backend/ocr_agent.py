@@ -77,12 +77,38 @@ class UniversalOCRAgent:
    - 提取圖片中所有可見的文字標註、地名、路名、標記
    - images.description 要詳細描述圖片內容和所有文字
 
-4. **內容提取**：
+4. **內容提取（blocks）**：
    - blocks.content 必須包含完整文字，不可截斷或省略
    - 每頁的所有文字區塊都要提取，不限數量
+   - 【特別重要】必須正確識別 header 和 section_title 類型
+     * header：文件標題、頁首標題、大標題
+     * section_title：章節標題、小節標題、段落標題
+     * 這些標題必須同時出現在 blocks 和 key_value_pairs 中
 
-5. **key_value_pairs**：
-   - 從表格和內容中提取所有重要的鍵值對
+5. **key_value_pairs**（必須提取）：
+   - 【強制要求】所有 header 和 section_title 類型的區塊，必須提取為鍵值對
+     * 格式：{{"key": "章節標題 - {type}", "value": "{標題內容}", "page": {頁碼}}}
+     * 例如：section_title 類型的標題「ESG 治理與2025 永續目標」→ {{"key": "章節標題 - section_title", "value": "ESG 治理與2025 永續目標", "page": 15}}
+     * 例如：header 類型的標題「永續宏碁」→ {{"key": "章節標題 - header", "value": "永續宏碁", "page": 15}}
+     * 這是最重要的規則，絕對不能遺漏任何 header 或 section_title
+   
+   - 從表格中提取：表格的每一行都應該提取為鍵值對
+     * 第一列作為 key，其他列作為 value
+     * 例如：表格行「姓名: 張三」→ {{"key": "姓名", "value": "張三", "page": 1}}
+   
+   - 從表單中提取：表單欄位名稱和對應值
+     * 例如：「聯絡電話: 0912-345-678」→ {{"key": "聯絡電話", "value": "0912-345-678", "page": 1}}
+   
+   - 從文字中提取：明顯的「標籤: 值」格式
+     * 例如：「地址: 台北市信義區...」→ {{"key": "地址", "value": "台北市信義區...", "page": 1}}
+   
+   - 重要資訊提取：金額、日期、編號、名稱等結構化資訊
+     * 例如：「總金額: 新台幣200萬元」→ {{"key": "總金額", "value": "新台幣200萬元", "page": 1}}
+   
+   - 格式要求：
+     * key 應該是簡潔的欄位名稱（不超過100字元）
+     * value 應該是完整的值（可以較長）
+     * 每個鍵值對都必須包含正確的 page 頁碼
 
 只輸出 JSON，不要其他文字"""
 
@@ -90,7 +116,7 @@ class UniversalOCRAgent:
         self,
         project_id: str,
         location: str = "us-central1",
-        model_name: str = "gemini-2.0-flash-lite",
+        model_name: str = "gemini-2.5-flash-lite",
         temperature: float = 0.1,
         max_output_tokens: int = 8192,
         max_workers: int = 4  # 並行處理數量

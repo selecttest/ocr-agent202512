@@ -126,23 +126,35 @@ class Database:
                 ))
             
             # 3.1 將 header 和 section_title 類型的 blocks 也存入 key_values
-            # 這樣可以更好地理解文件結構
+            # 這樣可以更好地理解文件結構（作為備份，確保不遺漏）
+            # 注意：AI 應該已經在 key_value_pairs 中提取了，這裡是強制備份
             section_count = 0
             for block in blocks:
                 block_type = block.get("type", "")
                 if block_type in ("header", "section_title"):
                     content = block.get("content", "").strip()
                     if content:
+                        # 使用格式：章節標題 - {type}，value 是標題內容
+                        # 例如：key = "章節標題 - section_title", value = "ESG 治理與2025 永續目標"
+                        key = f"章節標題 - {block_type}"
+                        
+                        # 檢查是否已存在（避免 AI 已提取的重複）
                         cur.execute("""
-                            INSERT INTO key_values (document_id, key, value, page)
-                            VALUES (%s, %s, %s, %s)
-                        """, (
-                            doc_id,
-                            f"章節標題({block_type})",
-                            content,
-                            block.get("page")
-                        ))
-                        section_count += 1
+                            SELECT id FROM key_values 
+                            WHERE document_id = %s AND key = %s AND value = %s
+                        """, (doc_id, key, content))
+                        
+                        if not cur.fetchone():
+                            cur.execute("""
+                                INSERT INTO key_values (document_id, key, value, page)
+                                VALUES (%s, %s, %s, %s)
+                            """, (
+                                doc_id,
+                                key,
+                                content,
+                                block.get("page")
+                            ))
+                            section_count += 1
             
             total_kv = len(key_values) + section_count
             logger.info(f"已儲存 {total_kv} 個 key-value pairs（含 {section_count} 個章節標題）")
@@ -179,7 +191,7 @@ class Database:
                             VALUES (%s, %s, %s, %s)
                         """, (
                             doc_id,
-                            f"圖片內容({img_type})",
+                            f"圖片內容 - {img_type}",
                             description,
                             img.get("page")
                         ))
