@@ -569,25 +569,20 @@ async def ask_question(request: QuestionRequest, req: Request):
     
     try:
         # 1. 從問題中提取關鍵字（用於 key_values 搜索）
-        stop_words = {'是', '什麼', '有', '哪些', '嗎', '呢', '的', '了', '在', '這', '那', '請', '問', '告訴', '我', '你', '他', '她', '它', '們'}
+        # 通用停用詞：過濾掉常見的助詞、代詞、疑問詞等，保留實質內容詞彙
+        stop_words = {
+            '是', '什麼', '有', '哪些', '嗎', '呢', '的', '了', '在', '這', '那', 
+            '請', '問', '告訴', '我', '你', '他', '她', '它', '們', '有關', '文件', 
+            '看', '哪份', '哪', '份', '要', '如何', '怎樣', '怎麼', '為何', '為什麼',
+            '可以', '能夠', '應該', '必須', '需要', '想要', '會', '會是', '會不會'
+        }
+        
+        # 提取長度 >= 2 的實詞作為關鍵字
         keywords = [w for w in question if len(w) >= 2 and w not in stop_words]
         
-        # 加入完整問題中的關鍵詞組
-        keyword_phrases = []
-        common_phrases = [
-            # 履歷相關
-            '學歷', '工作經歷', '技能', '經驗', '技術', '專案', '專案經歷', 
-            '聯絡', 'email', '電話', '姓名', '技術架構', 'Skills', '主修', '科系', '公司', '職位',
-            # 圖片相關
-            '圖片', '地圖', '照片', '圖表', 'logo', '標誌', '位置', '交通', '停車',
-            # 一般文件
-            '表格', '摘要', '總結', '內容', '說明'
-        ]
-        for phrase in common_phrases:
-            if phrase.lower() in question.lower():
-                keyword_phrases.append(phrase)
+        # 移除重複並過濾空值
+        all_keywords = list(set([k for k in keywords if k.strip()]))
         
-        all_keywords = list(set(keywords + keyword_phrases))
         logger.info(f"提取的關鍵字: {all_keywords}")
         
         # 2. 【優先】用關鍵字搜索 key_values
@@ -595,12 +590,10 @@ async def ask_question(request: QuestionRequest, req: Request):
         
         context_parts = []
         expanded_blocks = []
-        use_block_search = True  # 是否需要搜索 blocks
         
-        # 如果 key_values 找到結果（>= 1 條），就不搜索 blocks
+        # 2.1 處理 key_values 結果（如果有的話）
         if matched_key_values and len(matched_key_values) >= 1:
-            logger.info(f"key_values 找到 {len(matched_key_values)} 筆結果，跳過 blocks 搜索")
-            use_block_search = False
+            logger.info(f"key_values 找到 {len(matched_key_values)} 筆結果")
             
             # 組合 key_values 結果
             kv_text = "\n".join([
@@ -628,93 +621,84 @@ async def ask_question(request: QuestionRequest, req: Request):
             
             logger.info(f"從 key_values 相關頁面獲取 {len(expanded_blocks)} 個 blocks 作為補充")
         
-        # 3. 如果 key_values 沒找到足夠結果，才搜索 blocks
-        if use_block_search:
-            logger.info("key_values 結果不足，執行 blocks 向量搜索")
+        # 3. 同時執行 blocks 向量搜索（即使 key_values 有結果，也要搜索 blocks 以確保找到最相關的內容）
+        logger.info("執行 blocks 向量搜索以找到最相關的內容")
+        
+        # 將問題轉成 embedding
+        question_embedding = embedding_service.get_embedding(question)
+        
+        if not question_embedding:
+            status = "error"
+            raise HTTPException(status_code=500, detail="無法生成問題的 embedding")
+        
+        # 向量搜尋 blocks
+        relevant_blocks = db.search_blocks(
+            question_embedding, 
+            limit=top_k,
+            document_ids=document_ids
+        )
+        
+        if not relevant_blocks and not matched_key_values:
+            msg = "抱歉，在"
+            if document_ids:
+                msg += f"選擇的 {len(document_ids)} 份文件中"
+            else:
+                msg += "已上傳的文件中"
+            msg += "找不到相關資訊。"
+            answer = msg
             
-            # 將問題轉成 embedding
-            question_embedding = embedding_service.get_embedding(question)
-            
-            if not question_embedding:
-                status = "error"
-                raise HTTPException(status_code=500, detail="無法生成問題的 embedding")
-            
-            # 向量搜尋 blocks
-            relevant_blocks = db.search_blocks(
-                question_embedding, 
-                limit=top_k,
-                document_ids=document_ids
+            response_time_ms = int((time.time() - start_time) * 1000)
+            db.log_query(
+                question=question,
+                answer=answer,
+                document_ids=document_ids,
+                ip_address=client_ip,
+                user_agent=user_agent,
+                response_time_ms=response_time_ms,
+                status=status
             )
             
-            if not relevant_blocks and not matched_key_values:
-                msg = "抱歉，在"
-                if document_ids:
-                    msg += f"選擇的 {len(document_ids)} 份文件中"
-                else:
-                    msg += "已上傳的文件中"
-                msg += "找不到相關資訊。"
-                answer = msg
-                
-                response_time_ms = int((time.time() - start_time) * 1000)
-                db.log_query(
-                    question=question,
-                    answer=answer,
-                    document_ids=document_ids,
-                    ip_address=client_ip,
-                    user_agent=user_agent,
-                    response_time_ms=response_time_ms,
-                    status=status
-                )
-                
-                return AnswerResponse(answer=msg, sources=[])
+            return AnswerResponse(answer=msg, sources=[])
+        
+        # 收集匹配資訊
+        for block in relevant_blocks:
+            similarity_scores.append(block.get("similarity", 0))
+            matched_blocks_info.append({
+                "block_id": str(block.get("id")),
+                "document_id": str(block.get("document_id")),
+                "filename": block.get("filename"),
+                "page": block.get("page"),
+                "similarity": block.get("similarity")
+            })
+        
+        # 擴展搜索：獲取搜索結果所在頁及後續 2 頁
+        seen_block_ids = set()
+        doc_page_ranges = {}
+        
+        for block in relevant_blocks:
+            doc_id = str(block.get("document_id"))
+            page = block.get("page", 1)
             
-            # 收集匹配資訊
-            for block in relevant_blocks:
-                similarity_scores.append(block.get("similarity", 0))
-                matched_blocks_info.append({
-                    "block_id": str(block.get("id")),
-                    "document_id": str(block.get("document_id")),
-                    "filename": block.get("filename"),
-                    "page": block.get("page"),
-                    "similarity": block.get("similarity")
-                })
+            if doc_id not in doc_page_ranges:
+                doc_page_ranges[doc_id] = set()
             
-            # 擴展搜索：獲取搜索結果所在頁及後續 2 頁
-            seen_block_ids = set()
-            doc_page_ranges = {}
+            for p in range(page, page + 3):
+                doc_page_ranges[doc_id].add(p)
+        
+        for doc_id, pages in doc_page_ranges.items():
+            min_page = min(pages)
+            max_page = max(pages)
             
-            for block in relevant_blocks:
-                doc_id = str(block.get("document_id"))
-                page = block.get("page", 1)
-                
-                if doc_id not in doc_page_ranges:
-                    doc_page_ranges[doc_id] = set()
-                
-                for p in range(page, page + 3):
-                    doc_page_ranges[doc_id].add(p)
+            logger.info(f"擴展搜索: 文件 {doc_id}, 頁碼 {min_page}-{max_page}")
             
-            for doc_id, pages in doc_page_ranges.items():
-                min_page = min(pages)
-                max_page = max(pages)
-                
-                logger.info(f"擴展搜索: 文件 {doc_id}, 頁碼 {min_page}-{max_page}")
-                
-                extra_blocks = db.get_blocks_by_page_range(doc_id, min_page, max_page)
-                for b in extra_blocks:
-                    block_id = str(b.get("id"))
-                    if block_id not in seen_block_ids:
-                        seen_block_ids.add(block_id)
-                        expanded_blocks.append(b)
-            
-            logger.info(f"原始搜索結果: {len(relevant_blocks)} 個, 擴展後: {len(expanded_blocks)} 個")
-            
-            # 如果有 key_values 結果，也加入
-            if matched_key_values:
-                kv_text = "\n".join([
-                    f"- {kv['key']}: {kv['value']} (第{kv['page']}頁)" 
-                    for kv in matched_key_values
-                ])
-                context_parts.append(f"[關鍵資訊]\n{kv_text}")
+            extra_blocks = db.get_blocks_by_page_range(doc_id, min_page, max_page)
+            for b in extra_blocks:
+                block_id = str(b.get("id"))
+                if block_id not in seen_block_ids:
+                    seen_block_ids.add(block_id)
+                    expanded_blocks.append(b)
+        
+        logger.info(f"原始搜索結果: {len(relevant_blocks)} 個, 擴展後: {len(expanded_blocks)} 個")
         
         # 4. 組合 blocks 內容到 context
         expanded_blocks.sort(key=lambda x: (str(x.get("document_id")), x.get("page", 0)))
